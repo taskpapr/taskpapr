@@ -1,0 +1,26 @@
+# Database (local data — do not commit)
+data/
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+*.swp
+
+# Docker Compose
+docker-compose.yml
+
+# Configuration
+.env
+pricing.json
+
+# Private data 
+private_data/**
+

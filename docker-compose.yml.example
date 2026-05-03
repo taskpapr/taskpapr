@@ -1,0 +1,47 @@
+# taskpapr — example docker-compose.yml
+#
+# Usage:
+#   docker compose up -d
+#
+# The app will be available at http://localhost:3033
+# Data is persisted in a named Docker volume (taskpapr-data).
+#
+# To use a pre-built image from GitHub Container Registry instead of
+# building locally, replace the `build: .` line with:
+#   image: ghcr.io/YOUR_GITHUB_USERNAME/taskpapr:latest
+
+services:
+  taskpapr:
+    build: .
+    # image: ghcr.io/YOUR_GITHUB_USERNAME/taskpapr:latest  # ← use this after first push
+    container_name: taskpapr
+    restart: unless-stopped
+    ports:
+      - "3033:3033"
+    environment:
+      PORT: 3033
+      DB_PATH: /data/taskpapr.db
+      NODE_ENV: production
+    volumes:
+      - taskpapr-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3033/api/columns"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # ── Traefik labels (optional) ────────────────────────────
+    # Uncomment and adjust if you're running Traefik as a reverse proxy.
+    # Traefik will handle TLS automatically via Let's Encrypt.
+    #
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.taskpapr.rule=Host(`tasks.yourdomain.com`)"
+    #   - "traefik.http.routers.taskpapr.entrypoints=websecure"
+    #   - "traefik.http.routers.taskpapr.tls.certresolver=letsencrypt"
+    #   - "traefik.http.services.taskpapr.loadbalancer.server.port=3033"
+
+volumes:
+  taskpapr-data:
+    driver: local

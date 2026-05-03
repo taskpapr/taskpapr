@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.taskpapr.server</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/path/to/taskpapr/server.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/path/to/taskpapr</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/your-username/Library/Logs/taskpapr.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/your-username/Library/Logs/taskpapr.error.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PORT</key>
+    <string>3033</string>
+  </dict>
+</dict>
+</plist>

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>taskpapr — admin</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #f5f0e8; --bg-col: #faf7f2; --ink: #1a1a1a; --ink-mid: #555;
+      --ink-faint: #aaa; --accent: #2c5f8a; --danger: #b91c1c;
+      --border: #ddd6c8; --radius: 6px;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; background: var(--bg); color: var(--ink); }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; background: var(--bg-col); border-bottom: 1px solid var(--border); }
+    header h1 { font-family: 'SFMono-Regular', Menlo, monospace; font-size: 16px; }
+    header nav { display: flex; gap: 12px; align-items: center; }
+    header a { color: var(--ink-mid); text-decoration: none; font-size: 13px; }
+    header a:hover { color: var(--ink); }
+    .container { max-width: 900px; margin: 32px auto; padding: 0 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .container .full-width { grid-column: 1 / -1; }
+    .key-reveal { font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 12px; background: #f0f7e8; border: 1px solid #b7d9a0; color: #2d6a1e; border-radius: 4px; padding: 10px 12px; word-break: break-all; margin: 10px 0 4px; }
+    .key-reveal .label { font-size: 11px; color: #666; margin-bottom: 4px; font-family: inherit; }
+    .key-prefix { font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 12px; color: var(--ink-mid); background: rgba(0,0,0,0.04); border-radius: 3px; padding: 1px 5px; }
+    .panel { background: var(--bg-col); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    .panel-header { padding: 14px 16px; border-bottom: 1px solid var(--border); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ink-mid); }
+    .panel-body { padding: 12px 16px; }
+    .list-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .list-item:last-child { border-bottom: none; }
+    .list-item .main { flex: 1; font-size: 13px; }
+    .list-item .sub { font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
+    .badge { font-size: 10px; background: #e0f0ff; color: var(--accent); border-radius: 3px; padding: 1px 5px; font-weight: 600; }
+    .badge.admin { background: #fef3c7; color: #92400e; }
+    .badge.comp  { background: #d1fae5; color: #065f46; }
+    .btn-sm { padding: 4px 9px; font-size: 12px; }
+    .btn-secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+    .btn-secondary:hover { background: #e0f0ff; }
+    img.avatar { width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0; }
+    .add-form { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+    .add-form input { flex: 1; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; font-size: 13px; font-family: inherit; outline: none; background: white; }
+    .add-form input:focus { border-color: var(--accent); }
+    .btn { border: none; border-radius: var(--radius); padding: 6px 12px; font-size: 13px; font-family: inherit; cursor: pointer; }
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-danger { background: transparent; color: var(--danger); border: 1px solid transparent; }
+    .btn-danger:hover { border-color: var(--danger); background: #fee2e2; }
+    .empty { color: var(--ink-faint); font-style: italic; font-size: 13px; padding: 8px 0; }
+    .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1a1a1a; color: white; padding: 10px 20px; border-radius: var(--radius); font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>taskpapr admin</h1>
+  <nav>
+    <a href="/settings">⚙ Settings</a>
+    <a href="/">← Back to board</a>
+    <form method="POST" action="/auth/logout" style="margin:0">
+      <button class="btn btn-danger" type="submit">Sign out</button>
+    </form>
+  </nav>
+</header>
+
+<div class="container">
+  <!-- Registration mode -->
+  <div class="panel full-width" id="reg-panel">
+    <div class="panel-header">Registration</div>
+    <div class="panel-body" id="reg-status"><p class="empty">Loading…</p></div>
+  </div>
+
+  <!-- Whitelist (hidden when open registration is on) -->
+  <div class="panel" id="whitelist-panel">
+    <div class="panel-header">Invite whitelist</div>
+    <div class="panel-body">
+      <div id="whitelist-list"><p class="empty">Loading…</p></div>
+      <form class="add-form" id="add-whitelist-form">
+        <input type="email" id="wl-email" placeholder="email@example.com" required autocomplete="off"/>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Users -->
+  <div class="panel">
+    <div class="panel-header">Registered users</div>
+    <div class="panel-body">
+      <div id="users-list"><p class="empty">Loading…</p></div>
+    </div>
+  </div>
+
+  <!-- Debug tools -->
+  <div class="panel full-width" style="border:2px dashed var(--border);">
+    <div class="panel-header" style="color:var(--danger);">🔧 Debug tools — not for production</div>
+    <div class="panel-body">
+      <p style="font-size:12px;color:var(--ink-mid);margin-bottom:16px;">
+        Override the date taskpapr thinks it is. The board, spinning plates urgency heat, due-date labels, and
+        test notifications all use this date. <strong>Stored in memory only — clears on server restart.</strong>
+        A yellow pill appears in the board header when active.
+      </p>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div>
+          <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink-faint);display:block;margin-bottom:4px;">Date override</label>
+          <input type="date" id="debug-date-input"
+                 style="border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;font-size:13px;font-family:inherit;outline:none;background:white;"/>
+        </div>
+        <button class="btn btn-primary" id="debug-set-btn">Set date</button>
+        <button class="btn" id="debug-clear-btn" style="border:1px solid var(--border);">Clear (use real date)</button>
+      </div>
+      <div id="debug-status" style="font-size:12px;margin-top:10px;color:var(--ink-mid);"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+async function loadRegistrationStatus() {
+  const s = await api('GET', '/api/admin/registration-status');
+  const el = document.getElementById('reg-status');
+  const wlPanel = document.getElementById('whitelist-panel');
+  el.textContent = '';
+  const p = document.createElement('p');
+  p.style.margin = '0';
+  p.style.fontSize = '13px';
+
+  if (s.open_registration) {
+    const dot = document.createElement('span');
+    dot.style.color = '#059669';
+    dot.style.fontWeight = '700';
+    dot.textContent = '● Open registration';
+    p.appendChild(dot);
+    p.appendChild(document.createTextNode(` — anyone can sign up with GitHub${s.oidc_trust_idp ? ' or SSO' : ''}.`));
+    if (!s.require_whitelist_env) {
+      const auto = document.createElement('span');
+      auto.style.color = 'var(--ink-mid)';
+      auto.style.marginLeft = '8px';
+      auto.textContent = '(auto — STRIPE_SECRET_KEY is set)';
+      p.appendChild(document.createTextNode(' '));
+      p.appendChild(auto);
+    }
+    wlPanel.style.display = 'none';
+  } else {
+    const lock = document.createElement('span');
+    lock.style.fontWeight = '700';
+    lock.textContent = '🔒 Whitelist-only';
+    p.appendChild(lock);
+    p.appendChild(document.createTextNode(' — only pre-approved emails can sign up. '));
+    const hint = document.createElement('span');
+    hint.style.color = 'var(--ink-mid)';
+    hint.style.marginLeft = '8px';
+    hint.textContent = 'Set REQUIRE_WHITELIST=false to open registration.';
+    p.appendChild(hint);
+    wlPanel.style.display = '';
+  }
+
+  el.appendChild(p);
+}
+
+async function loadWhitelist() {
+  const items = await api('GET', '/api/admin/whitelist');
+  const el = document.getElementById('whitelist-list');
+  el.textContent = '';
+  if (!items.length) {
+    const p = document.createElement('p');
+    p.className = 'empty';
+    p.textContent = 'No emails added yet.';
+    el.appendChild(p);
+    return;
+  }
+
+  for (const w of items) {
+    const row = document.createElement('div');
+    row.className = 'list-item';
+    row.dataset.id = String(w.id);
+
+    const main = document.createElement('div');
+    main.className = 'main';
+
+    const emailText = document.createTextNode(String(w.email || ''));
+    main.appendChild(emailText);
+
+    if (w.note) {
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      sub.textContent = String(w.note);
+      main.appendChild(sub);
+    }
+
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-danger';
+    btn.textContent = 'Remove';
+    btn.addEventListener('click', () => removeWhitelist(w.id));
+
+    row.appendChild(main);
+    row.appendChild(btn);
+    el.appendChild(row);
+  }
+}
+
+async function loadUsers() {
+  const users = await api('GET', '/api/admin/users');
+  const el = document.getElementById('users-list');
+  el.textContent = '';
+  if (!users.length) {
+    const p = document.createElement('p');
+    p.className = 'empty';
+    p.textContent = 'No users yet.';
+    el.appendChild(p);
+    return;
+  }
+
+  for (const u of users) {
+    const row = document.createElement('div');
+    row.className = 'list-item';
+
+    if (u.avatar_url) {
+      const img = document.createElement('img');
+      img.className = 'avatar';
+      img.alt = '';
+      img.src = String(u.avatar_url);
+      row.appendChild(img);
+    }
+
+    const main = document.createElement('div');
+    main.className = 'main';
+
+    const name = (u.display_name || u.email || 'Unknown');
+    main.appendChild(document.createTextNode(String(name)));
+
+    if (u.is_admin) {
+      const badge = document.createElement('span');
+      badge.className = 'badge admin';
+      badge.textContent = 'admin';
+      main.appendChild(document.createTextNode(' '));
+      main.appendChild(badge);
+    }
+
+    if (u.complimentary) {
+      const badge = document.createElement('span');
+      badge.className = 'badge comp';
+      badge.textContent = '✓ comp';
+      main.appendChild(document.createTextNode(' '));
+      main.appendChild(badge);
+    }
+
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    const email = u.email || '';
+    const provider = u.provider || '';
+    const lastLogin = u.last_login_at ? String(u.last_login_at).slice(0, 10) : '';
+    sub.textContent = `${email} · via ${provider} · last login ${lastLogin}`;
+    main.appendChild(sub);
+
+    row.appendChild(main);
+
+    if (!u.is_admin) {
+      const btn = document.createElement('button');
+      btn.className = `btn btn-sm ${u.complimentary ? 'btn-danger' : 'btn-secondary'}`;
+      btn.textContent = u.complimentary ? '✗ Revoke' : '✓ Comp';
+      btn.title = u.complimentary
+        ? 'Revoke complimentary access'
+        : 'Grant complimentary (lifetime free) access';
+      btn.addEventListener('click', () => toggleComplimentary(u.id, !u.complimentary));
+      row.appendChild(btn);
+    }
+
+    el.appendChild(row);
+  }
+}
+
+async function toggleComplimentary(userId, grant) {
+  try {
+    await api('PATCH', `/api/admin/users/${userId}/complimentary`, { complimentary: grant });
+    toast(grant ? '✓ Complimentary access granted' : 'Complimentary access revoked');
+    loadUsers();
+  } catch (err) {
+    toast('Error: ' + err.message);
+  }
+}
+
+async function removeWhitelist(id) {
+  await api('DELETE', `/api/admin/whitelist/${id}`);
+  toast('Removed from whitelist');
+  loadWhitelist();
+}
+
+document.getElementById('add-whitelist-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const email = document.getElementById('wl-email').value.trim();
+  try {
+    await api('POST', '/api/admin/whitelist', { email });
+    document.getElementById('wl-email').value = '';
+    toast('Added to whitelist');
+    loadWhitelist();
+  } catch (err) {
+    toast(err.message.includes('409') ? 'Already whitelisted' : 'Error: ' + err.message);
+  }
+});
+
+// ── Debug date ────────────────────────────────────────────────
+async function loadDebugDate() {
+  try {
+    const me = await api('GET', '/api/me');
+    if (me.debug_date) {
+      document.getElementById('debug-date-input').value = me.debug_date;
+      document.getElementById('debug-status').textContent = `Active: date override is ${me.debug_date}`;
+      document.getElementById('debug-status').style.color = '#92400e';
+    }
+  } catch (_) {}
+}
+
+document.getElementById('debug-set-btn').addEventListener('click', async () => {
+  const date = document.getElementById('debug-date-input').value;
+  const statusEl = document.getElementById('debug-status');
+  if (!date) { statusEl.textContent = 'Pick a date first.'; return; }
+  try {
+    await api('POST', '/api/admin/debug/date', { date });
+    statusEl.style.color = '#92400e';
+    statusEl.textContent = `✓ Date override set to ${date}. Reload the board to see the effect.`;
+    toast('Debug date set to ' + date);
+  } catch (err) {
+    statusEl.style.color = 'var(--danger)';
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+});
+
+document.getElementById('debug-clear-btn').addEventListener('click', async () => {
+  const statusEl = document.getElementById('debug-status');
+  try {
+    await fetch('/api/admin/debug/date', { method: 'DELETE' });
+    document.getElementById('debug-date-input').value = '';
+    statusEl.style.color = 'var(--ink-mid)';
+    statusEl.textContent = '✓ Date override cleared — using real system date.';
+    toast('Debug date cleared');
+  } catch (err) {
+    statusEl.style.color = 'var(--danger)';
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+});
+
+loadRegistrationStatus();
+loadWhitelist();
+loadUsers();
+loadDebugDate();
+</script>
+</body>
+</html>

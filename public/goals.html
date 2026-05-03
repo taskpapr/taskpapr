@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>taskpapr — goals</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #f5f0e8; --bg-col: #faf7f2; --ink: #1a1a1a; --ink-mid: #555;
+      --ink-faint: #aaa; --accent: #2c5f8a; --danger: #b91c1c;
+      --border: #ddd6c8; --radius: 6px;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; background: var(--bg); color: var(--ink); }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; background: var(--bg-col); border-bottom: 1px solid var(--border); }
+    header h1 { font-family: 'SFMono-Regular', Menlo, monospace; font-size: 16px; }
+    header nav { display: flex; gap: 12px; align-items: center; }
+    header a { color: var(--ink-mid); text-decoration: none; font-size: 13px; }
+    header a:hover { color: var(--ink); }
+    .container { max-width: 600px; margin: 32px auto; padding: 0 24px; }
+    .panel { background: var(--bg-col); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    .panel-header { padding: 14px 16px; border-bottom: 1px solid var(--border); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ink-mid); }
+    .panel-body { padding: 4px 16px 16px; }
+    .list-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .list-item:last-child { border-bottom: none; }
+    .goal-name { flex: 1; font-size: 14px; color: var(--ink); }
+    .task-count { font-size: 11px; font-weight: 700; color: white; background: var(--accent); border-radius: 10px; padding: 1px 8px; white-space: nowrap; flex-shrink: 0; }
+    .task-count.zero { background: var(--border); color: var(--ink-faint); }
+    .add-form { display: flex; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+    .add-form input { flex: 1; border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 10px; font-size: 13px; font-family: inherit; outline: none; background: white; }
+    .add-form input:focus { border-color: var(--accent); }
+    .btn { border: none; border-radius: var(--radius); padding: 7px 14px; font-size: 13px; font-family: inherit; cursor: pointer; }
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-danger { background: transparent; color: var(--danger); border: 1px solid transparent; padding: 4px 8px; font-size: 13px; }
+    .btn-danger:hover { border-color: var(--danger); background: #fee2e2; }
+    .empty { color: var(--ink-faint); font-style: italic; font-size: 13px; padding: 16px 0 8px; }
+    .hint { font-size: 12px; color: var(--ink-faint); margin: 12px 0 4px; line-height: 1.5; }
+    .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1a1a1a; color: white; padding: 10px 20px; border-radius: var(--radius); font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+    .toast.show { opacity: 1; }
+    /* Custom dialog */
+    .taskpapr-dialog-backdrop { position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:9000;display:flex;align-items:center;justify-content:center; }
+    .taskpapr-dialog { background:var(--bg-col);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 8px 32px rgba(0,0,0,0.18);padding:24px 28px 20px;width:min(420px,90vw);font-family:inherit; }
+    .taskpapr-dialog p { margin:0 0 20px;font-size:14px;color:var(--ink);line-height:1.5; }
+    .taskpapr-dialog-btns { display:flex;gap:8px;justify-content:flex-end; }
+    .taskpapr-dialog-btns button { padding:7px 18px;font-size:13px;font-family:inherit;border-radius:var(--radius);border:1px solid var(--border);cursor:pointer; }
+    .taskpapr-dialog-btns .btn-cancel { background:var(--bg);color:var(--ink-mid); }
+    .taskpapr-dialog-btns .btn-cancel:hover { background:var(--border); }
+    .taskpapr-dialog-btns .btn-ok { background:var(--accent);color:#fff;border-color:var(--accent); }
+    .taskpapr-dialog-btns .btn-ok:hover { background:#245078;border-color:#245078; }
+    .taskpapr-dialog-btns .btn-danger { background:var(--danger);color:#fff;border-color:var(--danger); }
+    .taskpapr-dialog-btns .btn-danger:hover { background:#991b1b;border-color:#991b1b; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>taskpapr goals</h1>
+  <nav>
+    <a href="/settings">⚙ Settings</a>
+    <a id="admin-link" href="/admin" style="display:none">Admin</a>
+    <a href="/">← Back to board</a>
+    <form method="POST" action="/auth/logout" style="margin:0" id="logout-form">
+      <button class="btn btn-danger" type="submit" id="logout-btn">Sign out</button>
+    </form>
+  </nav>
+</header>
+
+<div class="container">
+  <div class="panel">
+    <div class="panel-header">Your goals</div>
+    <div class="panel-body">
+      <p class="hint">
+        Goals are tags you can attach to tasks. Press <strong>G</strong> on the board to toggle
+        goal tiles — a filtered view showing all tasks for each goal.
+        Assign a goal to a task via its <strong>⋯</strong> menu.
+      </p>
+      <div id="goals-list"><p class="empty">Loading…</p></div>
+      <form class="add-form" id="add-goal-form">
+        <input type="text" id="new-goal-input" placeholder="New goal name…" autocomplete="off" required />
+        <button class="btn btn-primary" type="submit">Add goal</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+let goals = [];
+let taskCounts = {};
+
+async function loadData() {
+  try {
+    const [fetchedGoals, tasks] = await Promise.all([
+      api('GET', '/api/goals'),
+      api('GET', '/api/tasks'),
+    ]);
+    goals = fetchedGoals;
+    taskCounts = {};
+    tasks.forEach(t => {
+      if (t.goal_id) taskCounts[t.goal_id] = (taskCounts[t.goal_id] || 0) + 1;
+    });
+    renderGoals();
+  } catch (err) {
+    const list = document.getElementById('goals-list');
+    list.textContent = '';
+    const p = document.createElement('p');
+    p.style.color = 'var(--danger)';
+    p.style.fontSize = '13px';
+    p.style.padding = '12px 0';
+    p.textContent = `Error loading goals: ${err.message}`;
+    list.appendChild(p);
+  }
+}
+
+function renderGoals() {
+  const list = document.getElementById('goals-list');
+  if (goals.length === 0) {
+    list.innerHTML = '<p class="empty">No goals yet. Add one below.</p>';
+    return;
+  }
+  list.innerHTML = '';
+  goals.forEach(goal => {
+    const count = taskCounts[goal.id] || 0;
+    const item = document.createElement('div');
+    item.className = 'list-item';
+    item.innerHTML = `
+      <span class="goal-name">${escHtml(goal.title)}</span>
+      <span class="task-count${count === 0 ? ' zero' : ''}" title="${count} task${count !== 1 ? 's' : ''} linked">
+        ${count} task${count !== 1 ? 's' : ''}
+      </span>
+      <button class="btn-danger" data-id="${goal.id}" data-name="${escHtml(goal.title)}" onclick="deleteGoal(this)">✕</button>
+    `;
+    list.appendChild(item);
+  });
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function paprConfirm(message, { okLabel = 'OK', danger = false } = {}) {
+  return new Promise(resolve => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'taskpapr-dialog-backdrop';
+    backdrop.innerHTML = `
+      <div class="taskpapr-dialog" role="dialog" aria-modal="true">
+        <p>${message}</p>
+        <div class="taskpapr-dialog-btns">
+          <button class="btn-cancel">Cancel</button>
+          <button class="${danger ? 'btn-danger' : 'btn-ok'}">${okLabel}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const [cancelBtn, okBtn] = backdrop.querySelectorAll('button');
+    const close = r => { backdrop.remove(); resolve(r); };
+    cancelBtn.addEventListener('click', () => close(false));
+    okBtn.addEventListener('click',     () => close(true));
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(false); });
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { document.removeEventListener('keydown', esc); close(false); }
+    });
+    okBtn.focus();
+  });
+}
+
+async function deleteGoal(btn) {
+  const id   = parseInt(btn.dataset.id);
+  const name = btn.dataset.name;
+  const count = taskCounts[id] || 0;
+  const msg = count > 0
+    ? `Delete goal "${name}"? It is linked to ${count} task${count !== 1 ? 's' : ''} (those tasks will have no goal).`
+    : `Delete goal "${name}"?`;
+  const ok = await paprConfirm(msg, { okLabel: 'Delete', danger: true });
+  if (!ok) return;
+  try {
+    await api('DELETE', `/api/goals/${id}`);
+    goals = goals.filter(g => g.id !== id);
+    delete taskCounts[id];
+    renderGoals();
+    toast('Goal deleted');
+  } catch (err) {
+    toast('Error: ' + err.message);
+  }
+}
+
+document.getElementById('add-goal-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const input = document.getElementById('new-goal-input');
+  const title = input.value.trim();
+  if (!title) return;
+  try {
+    const goal = await api('POST', '/api/goals', { title });
+    goals.push(goal);
+    renderGoals();
+    input.value = '';
+    input.focus();
+    toast('Goal added');
+  } catch (err) {
+    toast('Error: ' + err.message);
+  }
+});
+
+async function loadMe() {
+  try {
+    const me = await api('GET', '/api/me');
+    if (me.is_admin) document.getElementById('admin-link').style.display = '';
+    if (me.single_user) document.getElementById('logout-btn').style.display = 'none';
+  } catch (_) {}
+}
+
+loadMe();
+loadData();
+</script>
+</body>
+</html>

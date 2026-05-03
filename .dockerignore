@@ -1,0 +1,21 @@
+# Don't copy local data into the image
+data/
+
+# Dev dependencies and local state
+node_modules/
+.git/
+.gitignore
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+*.swp
+
+# Local env
+.env
+.env.*

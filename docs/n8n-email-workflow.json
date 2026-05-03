@@ -1,0 +1,180 @@
+{
+  "name": "Email → taskpapr (Cloudmailin)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "email-to-taskpapr",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Cloudmailin Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "email-to-taskpapr"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\n// Extract subject — Cloudmailin puts it in headers.subject;\n// IMAP and Mailgun put it directly in subject.\nconst rawSubject = item.headers?.subject || item.subject || 'Untitled email';\n\n// Strip Re: / Fwd: prefixes and collapse whitespace\nconst cleanTitle = rawSubject\n  .replace(/^(Re|Fwd?|FW|RE):\\s*/i, '')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .substring(0, 120);\n\n// Capture plain-text body (Cloudmailin: item.plain; IMAP: item.text)\nconst body = (item.plain || item.text || '').trim().substring(0, 2000);\n\n// Sender — Cloudmailin: item.envelope.from; IMAP/Mailgun: item.from or item.sender\nconst from = item.envelope?.from || item.from || item.sender || '';\n\nreturn [{ json: { title: cleanTitle, body, from } }];"
+      },
+      "id": "code-clean-subject",
+      "name": "Clean subject & extract body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "no-noreply",
+              "leftValue": "={{ $json.from }}",
+              "rightValue": "noreply",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            },
+            {
+              "id": "no-no-reply",
+              "leftValue": "={{ $json.from }}",
+              "rightValue": "no-reply",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-filter-automated",
+      "name": "Filter automated senders",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://your-taskpapr-instance/api/webhook",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer tp_YOUR_API_KEY_HERE"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "action",
+              "value": "add_task"
+            },
+            {
+              "name": "tile",
+              "value": "Inbox"
+            },
+            {
+              "name": "title",
+              "value": "={{ $json.title }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-create-task",
+      "name": "Create task in Inbox",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 280]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://your-taskpapr-instance/api/tasks/{{ $('Create task in Inbox').item.json.task.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer tp_YOUR_API_KEY_HERE"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"notes\": {{ JSON.stringify($('Clean subject & extract body').item.json.body) }} }",
+        "options": {}
+      },
+      "id": "http-set-notes",
+      "name": "Set notes from email body",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 280]
+    }
+  ],
+  "connections": {
+    "Cloudmailin Webhook": {
+      "main": [
+        [
+          {
+            "node": "Clean subject & extract body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean subject & extract body": {
+      "main": [
+        [
+          {
+            "node": "Filter automated senders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter automated senders": {
+      "main": [
+        [
+          {
+            "node": "Create task in Inbox",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create task in Inbox": {
+      "main": [
+        [
+          {
+            "node": "Set notes from email body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {}
+}
