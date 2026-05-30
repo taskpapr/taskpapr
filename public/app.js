@@ -3326,7 +3326,25 @@ async function pollForChanges() {
   }
 }
 
-setInterval(pollForChanges, 60_000);
+// ── Server-Sent Events — real-time change notifications ──────
+// The server pushes `data: change\n\n` after every write. EventSource
+// auto-reconnects on connection loss. A 5-minute fallback poll catches
+// edge cases (proxy buffering, missed events, server restart).
+(function startSse() {
+  const es = new EventSource('/api/events');
+  es.onmessage = (e) => { if (e.data === 'change') pollForChanges(); };
+  es.onerror = () => {
+    // On persistent error, close and schedule a manual reconnect.
+    // (EventSource auto-reconnects for transient failures; this handles
+    // cases where the browser gives up after repeated failures.)
+    es.close();
+    setTimeout(startSse, 10_000);
+  };
+})();
+
+// Safety-net poll — handles cases where SSE events are missed
+// (e.g. the server restarted without flushing, a proxy is buffering).
+setInterval(pollForChanges, 5 * 60 * 1000);
 
 // ── Canvas Bookmarks ──────────────────────────────────────────
 // Saved views: store x/y/zoom in DB for cross-device sync.
