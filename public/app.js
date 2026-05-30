@@ -58,6 +58,13 @@ let zTop = 10;
 function bringToFront(colEl) {
   zTop++;
   colEl.style.zIndex = zTop;
+  if (zTop > 1000) {
+    const cols = [...document.querySelectorAll('.column')].sort(
+      (a, b) => (+a.style.zIndex || 0) - (+b.style.zIndex || 0)
+    );
+    cols.forEach((c, i) => { c.style.zIndex = 10 + i; });
+    zTop = 10 + cols.length;
+  }
 }
 
 const canvas   = document.getElementById('board-canvas');
@@ -719,8 +726,12 @@ function refreshColumn(el, col) {
   // Rebuild the inner content but keep the element itself (so drag state isn't lost)
   const wasDragging = el.classList.contains('col-dragging');
 
-  // Bring to front on any interaction (re-attach after refresh)
-  el.addEventListener('mousedown', () => bringToFront(el), true);
+  // Skip re-render if user has an active edit inside this column — avoids stomping
+  // in-progress title edits (contentEditable) or the add-task input.
+  // The next poll cycle will pick up server state once the edit completes.
+  if (el.contains(document.activeElement) &&
+      (document.activeElement.contentEditable === 'true' ||
+       document.activeElement.tagName === 'INPUT')) return;
 
   // Replace header
   const oldHeader = el.querySelector('.column-header');
