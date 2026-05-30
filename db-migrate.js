@@ -31,6 +31,16 @@ async function run() {
   try {
     console.log('[migrate] Connected to PostgreSQL:', process.env.DATABASE_URL.replace(/:\/\/[^@]+@/, '://***@'));
 
+    await client.query('BEGIN');
+
+    // ── Migration version tracking ─────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version    INTEGER PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
     // ── Core schema ────────────────────────────────────────────
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -209,7 +219,11 @@ async function run() {
     `);
     console.log('[migrate] ✓ columns.updated_at');
 
+    await client.query('COMMIT');
     console.log('[migrate] Migration complete ✓');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
   } finally {
     client.release();
     await pool.end();

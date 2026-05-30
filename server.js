@@ -86,15 +86,23 @@ app.use(rateLimitGlobal);
 // ── Body parser (explicit limit) ──────────────────────────────
 app.use(express.json({ limit: '200kb' }));
 
-// ── Hosted Postgres: debug date lives in DB only (survives LB switching instances)
-app.use(async (req, res, next) => {
+// ── Hosted Postgres: debug date cached in memory (30s TTL), refreshed on write.
+// Per-replica caching is fine — debug_date changes at most a few times per day.
+let _pgDebugDateCache     = null;
+let _pgDebugDateCacheTime = 0;
+app.use((req, res, next) => {
   if (!isPostgres) return next();
-  try {
-    const row = await queryOne("SELECT value FROM settings WHERE key = 'debug_date'");
-    const debugDate = row?.value ?? null;
-    debugDateStorage.run({ debugDate }, () => next());
-  } catch (err) {
-    next(err);
+  const now = Date.now();
+  if (now - _pgDebugDateCacheTime > 30_000) {
+    queryOne("SELECT value FROM settings WHERE key = 'debug_date'")
+      .then(row => {
+        _pgDebugDateCache     = row?.value ?? null;
+        _pgDebugDateCacheTime = Date.now();
+        debugDateStorage.run({ debugDate: _pgDebugDateCache }, () => next());
+      })
+      .catch(err => next(err));
+  } else {
+    debugDateStorage.run({ debugDate: _pgDebugDateCache }, () => next());
   }
 });
 
@@ -153,6 +161,9 @@ async function setDebugDate(date) {
   }
   if (val) await upsertSetting('debug_date', val);
   else await queryRun("DELETE FROM settings WHERE key = 'debug_date'");
+  // Invalidate per-request cache so the new value is visible immediately
+  _pgDebugDateCache     = val;
+  _pgDebugDateCacheTime = Date.now();
   const store = debugDateStorage.getStore();
   if (store) store.debugDate = val;
   _pgJobDebugDate = val;
@@ -1176,7 +1187,7 @@ app.get('/api/export', async (req, res) => {
   res.json(payload);
 });
 
-app.post('/api/import', express.json({ limit: '10mb' }), async (req, res) => {
+app.post('/api/import', rateLimitWrites, express.json({ limit: '10mb' }), async (req, res) => {
   const uid  = req.user.id;
   const mode = (typeof req.query.mode === 'string' ? req.query.mode : 'merge').toLowerCase();
 
@@ -1205,6 +1216,12 @@ app.post('/api/import', express.json({ limit: '10mb' }), async (req, res) => {
       await queryRun('DELETE FROM goals   WHERE user_id = ?', [uid]);
     }
 
+    // Pre-load existing data once (O(1) per lookup vs O(N) per item in loop)
+    const existingGoals = mode === 'merge' ? await queries.goals.all.all(uid) : [];
+    const existingCols  = mode === 'merge' ? await queries.columns.all.all(uid) : [];
+    const goalsByTitle  = new Map(existingGoals.map(g => [g.title.toLowerCase(), g]));
+    const colsByName    = new Map(existingCols.map(c => [c.name.toLowerCase(), c]));
+
     // ── Import goals ────────────────────────────────────────
     const goalMap = {}; // title → new id
 
@@ -1213,15 +1230,13 @@ app.post('/api/import', express.json({ limit: '10mb' }), async (req, res) => {
         if (typeof g.title !== 'string' || !g.title.trim()) { counts.skipped++; continue; }
 
         if (mode === 'merge') {
-          // Skip if a goal with this title already exists
-          const existing = (await queries.goals.all.all(uid)).find(
-            eg => eg.title.toLowerCase() === g.title.toLowerCase()
-          );
+          const existing = goalsByTitle.get(g.title.toLowerCase());
           if (existing) { goalMap[g.title] = existing.id; continue; }
         }
 
         const info = await queries.goals.insert.run(uid, g.title.trim(), (typeof g.notes === 'string' && g.notes) ? g.notes : null, uid);
         goalMap[g.title] = info.id;
+        goalsByTitle.set(g.title.toLowerCase(), { id: info.id, title: g.title });
         counts.goals++;
       }
     }
@@ -1234,9 +1249,7 @@ app.post('/api/import', express.json({ limit: '10mb' }), async (req, res) => {
 
       if (mode === 'merge') {
         // Reuse existing tile with same name if present
-        const existing = (await queries.columns.all.all(uid)).find(
-          ec => ec.name.toLowerCase() === tile.name.toLowerCase()
-        );
+        const existing = colsByName.get(tile.name.toLowerCase());
         if (existing) {
           colId = existing.id;
         } else {
@@ -1390,133 +1403,125 @@ app.patch('/api/tasks/:id', async (req, res) => {
   const id  = parseInt(req.params.id);
   const uid = req.user.id;
   const { status, title, goal_id, position, column_id } = req.body;
+
+  // ── 1. Type-check inputs before any DB access ────────────────
+  if (title !== undefined && typeof title !== 'string') {
+    return res.status(400).json({ error: 'title must be a string' });
+  }
+
+  // Pre-parse all optional fields so validation runs before any SQL
+  const titleTrimmed   = title     !== undefined ? title.trim()              : undefined;
+  const nextNotes      = req.body.notes        !== undefined ? (req.body.notes        || null) : undefined;
+  const nextDue        = req.body.next_due      !== undefined ? (req.body.next_due      || null) : undefined;
+  const nextRecurrence = req.body.recurrence    !== undefined ? (req.body.recurrence    || null) : undefined;
+  const vdParsed       = req.body.visibility_days !== undefined ? parseInt(req.body.visibility_days) : undefined;
+  const nextVd         = vdParsed  !== undefined ? (isNaN(vdParsed) ? 3 : vdParsed)  : undefined;
+  const nextNoRot      = req.body.no_rot        !== undefined ? (req.body.no_rot        ? 1 : 0)  : undefined;
+  const nextRot        = req.body.rot_interval  !== undefined ? (req.body.rot_interval  || 'weekly') : undefined;
+  const nextColor      = req.body.color         !== undefined ? (req.body.color         || null) : undefined;
+  const nextFlag       = req.body.today_flag    !== undefined ? (req.body.today_flag    ? 1 : 0)  : undefined;
+  const ordParsed      = req.body.today_order   !== undefined && req.body.today_order !== null
+    ? parseInt(req.body.today_order) : req.body.today_order;
+  const nextOrd        = req.body.today_order   !== undefined ? (isNaN(ordParsed) ? null : (ordParsed ?? null)) : undefined;
+
+  // ── 2. Length validation before any SQL ──────────────────────
+  if (titleTrimmed !== undefined) {
+    const lenErr = validateLen(titleTrimmed, LIMITS.titleLen, 'Task title');
+    if (lenErr) return res.status(400).json({ error: lenErr });
+  }
+  if (nextNotes !== undefined && nextNotes !== null) {
+    const notesLenErr = validateLen(nextNotes, LIMITS.notesLen, 'Notes');
+    if (notesLenErr) return res.status(400).json({ error: notesLenErr });
+  }
+
+  // ── 3. Load current task + verify column ownership ───────────
   const needsCurrent =
-    status !== undefined ||
-    title !== undefined ||
-    goal_id !== undefined ||
-    position !== undefined ||
-    column_id !== undefined ||
-    req.body.notes !== undefined ||
-    req.body.next_due !== undefined ||
-    req.body.recurrence !== undefined ||
-    req.body.visibility_days !== undefined ||
-    req.body.no_rot !== undefined ||
-    req.body.rot_interval !== undefined ||
-    req.body.color !== undefined ||
-    req.body.today_flag !== undefined ||
-    req.body.today_order !== undefined ||
-    req.body._ack;
+    status !== undefined || title !== undefined || goal_id !== undefined ||
+    position !== undefined || column_id !== undefined || nextNotes !== undefined ||
+    nextDue !== undefined || nextRecurrence !== undefined || nextVd !== undefined ||
+    nextNoRot !== undefined || nextRot !== undefined || nextColor !== undefined ||
+    nextFlag !== undefined || nextOrd !== undefined || req.body._ack;
   const current = needsCurrent ? await queries.tasks.byId.get(id, uid) : null;
   if (needsCurrent && !current) return res.status(404).json({ error: 'task not found' });
 
-  if (title !== undefined && typeof title !== 'string') return res.status(400).json({ error: 'title must be a string' });
+  if (position !== undefined && column_id !== undefined) {
+    const destCol = await queries.columns.byId.get(column_id, uid);
+    if (!destCol) return res.status(403).json({ error: 'forbidden' });
+  }
 
-  if (status !== undefined) {
-    if (status === 'done') {
-      if (current && current.recurrence) {
-        // Recurring task completed:
-        // -1 = always visible → reset to active immediately (spinning-plates style)
-        // ≥0 = hide until next_due window → set dormant
-        const nextDue = advanceDate(current.next_due || getTodayStr(), current.recurrence);
-        const alwaysVisible = (current.visibility_days === -1 || current.visibility_days == null);
-        const newStatus = alwaysVisible ? 'active' : 'dormant';
-        await queryRun(`UPDATE tasks SET status=?, last_done_at=${sqlNowExpr()}, next_due=?, updated_at=${sqlNowExpr()} WHERE id=? AND user_id=?`, [newStatus, nextDue, id, uid]);
+  // ── 4. All mutations in a single transaction ─────────────────
+  // Validation is complete — no early returns inside the transaction block.
+  await transaction(async () => {
+    if (status !== undefined) {
+      if (status === 'done') {
+        if (current.recurrence) {
+          // Recurring task completed:
+          // -1 = always visible → reset to active immediately (spinning-plates style)
+          // ≥0 = hide until next_due window → set dormant
+          const nextDueR = advanceDate(current.next_due || getTodayStr(), current.recurrence);
+          const alwaysVisible = (current.visibility_days === -1 || current.visibility_days == null);
+          const newStatus = alwaysVisible ? 'active' : 'dormant';
+          await queryRun(`UPDATE tasks SET status=?, last_done_at=${sqlNowExpr()}, next_due=?, updated_at=${sqlNowExpr()} WHERE id=? AND user_id=?`, [newStatus, nextDueR, id, uid]);
+        } else {
+          await queries.tasks.updateStatus.run(status, id, uid);
+        }
+        // Completing a task removes it from the Today view immediately.
+        // today_flag is cleared; today_order is left in place (harmless, reused if
+        // the task is un-done). For recurring tasks the flag also clears — the
+        // reset task starts the next cycle unflagged.
+        await queryRun("UPDATE tasks SET today_flag = 0 WHERE id = ? AND user_id = ?", [id, uid]);
       } else {
         await queries.tasks.updateStatus.run(status, id, uid);
       }
-      // Completing a task removes it from the Today view immediately.
-      // today_flag is cleared; today_order is left in place (harmless, reused if
-      // the task is un-done). For recurring tasks the flag also clears — the
-      // reset task starts the next cycle unflagged.
-      await queryRun("UPDATE tasks SET today_flag = 0 WHERE id = ? AND user_id = ?", [id, uid]);
-    } else {
-      await queries.tasks.updateStatus.run(status, id, uid);
     }
-  }
-  if (title !== undefined) {
-    const trimmed = title.trim();
-    const lenErr = validateLen(trimmed, LIMITS.titleLen, 'Task title');
-    if (lenErr) return res.status(400).json({ error: lenErr });
-    if (current && trimmed && trimmed !== current.title) {
-      await queries.tasks.updateTitle.run(trimmed, id, uid);
+    if (titleTrimmed !== undefined && titleTrimmed && titleTrimmed !== current.title) {
+      await queries.tasks.updateTitle.run(titleTrimmed, id, uid);
     }
-  }
-  if (goal_id !== undefined) {
-    const goalVal = (goal_id === null || goal_id === '') ? null : goal_id;
-    if (current && (current.goal_id ?? null) !== (goalVal ?? null)) {
-      await queries.tasks.updateGoal.run(goalVal, id, uid);
+    if (goal_id !== undefined) {
+      const goalVal = (goal_id === null || goal_id === '') ? null : goal_id;
+      if ((current.goal_id ?? null) !== (goalVal ?? null)) {
+        await queries.tasks.updateGoal.run(goalVal, id, uid);
+      }
     }
-  }
-  if (req.body.notes !== undefined) {
-    const notesLenErr = validateLen(req.body.notes || '', LIMITS.notesLen, 'Notes');
-    if (notesLenErr) return res.status(400).json({ error: notesLenErr });
-    const nextNotes = req.body.notes || null;
-    if ((current.notes || null) !== nextNotes) {
+    if (nextNotes !== undefined && (current.notes || null) !== nextNotes) {
       await queryRun(`UPDATE tasks SET notes = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextNotes, id, uid]);
     }
-  }
-  if (req.body.next_due !== undefined) {
-    const nextDue = req.body.next_due || null;
-    if ((current.next_due || null) !== nextDue) {
+    if (nextDue !== undefined && (current.next_due || null) !== nextDue) {
       await queryRun(`UPDATE tasks SET next_due = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextDue, id, uid]);
       await syncDormantState(id, uid);
     }
-  }
-  if (req.body.recurrence !== undefined) {
-    const nextRecurrence = req.body.recurrence || null;
-    if ((current.recurrence || null) !== nextRecurrence) {
+    if (nextRecurrence !== undefined && (current.recurrence || null) !== nextRecurrence) {
       await queryRun(`UPDATE tasks SET recurrence = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextRecurrence, id, uid]);
     }
-  }
-  if (req.body.visibility_days !== undefined) {
-    const vd = parseInt(req.body.visibility_days);
-    const nextVd = isNaN(vd) ? 3 : vd;
-    if ((current.visibility_days ?? 3) !== nextVd) {
+    if (nextVd !== undefined && (current.visibility_days ?? 3) !== nextVd) {
       await queryRun(`UPDATE tasks SET visibility_days = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextVd, id, uid]);
       await syncDormantState(id, uid);
     }
-  }
-  if (req.body.no_rot !== undefined) {
-    const nextNoRot = req.body.no_rot ? 1 : 0;
-    if ((current.no_rot ? 1 : 0) !== nextNoRot) {
+    if (nextNoRot !== undefined && (current.no_rot ? 1 : 0) !== nextNoRot) {
       await queryRun(`UPDATE tasks SET no_rot = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextNoRot, id, uid]);
     }
-  }
-  if (req.body.rot_interval !== undefined) {
-    const nextRot = req.body.rot_interval || 'weekly';
-    if ((current.rot_interval || 'weekly') !== nextRot) {
+    if (nextRot !== undefined && (current.rot_interval || 'weekly') !== nextRot) {
       await queryRun(`UPDATE tasks SET rot_interval = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextRot, id, uid]);
     }
-  }
-  if (req.body.color !== undefined) {
-    const nextColor = req.body.color || null;
-    if ((current.color || null) !== nextColor) {
+    if (nextColor !== undefined && (current.color || null) !== nextColor) {
       await queryRun(`UPDATE tasks SET color = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextColor, id, uid]);
     }
-  }
-  if (req.body.today_flag !== undefined) {
-    const nextFlag = req.body.today_flag ? 1 : 0;
-    if ((current.today_flag ? 1 : 0) !== nextFlag) {
+    if (nextFlag !== undefined && (current.today_flag ? 1 : 0) !== nextFlag) {
       await queryRun(`UPDATE tasks SET today_flag = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextFlag, id, uid]);
     }
-  }
-  if (req.body.today_order !== undefined) {
-    const ord = req.body.today_order === null ? null : parseInt(req.body.today_order);
-    const nextOrd = isNaN(ord) ? null : ord;
-    if ((current.today_order ?? null) !== nextOrd) {
+    if (nextOrd !== undefined && (current.today_order ?? null) !== nextOrd) {
       await queryRun(`UPDATE tasks SET today_order = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextOrd, id, uid]);
     }
-  }
-  // Only an explicit Touch action (_ack) bumps last_acknowledged_at.
-  // Saving notes or title is a content edit, not a deliberate "touch".
-  if (req.body._ack) {
-    await queryRun(`UPDATE tasks SET last_acknowledged_at = ${sqlNowExpr()}, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [id, uid]);
-  }
-  if (position  !== undefined && column_id !== undefined) {
-    const destCol = await queries.columns.byId.get(column_id, uid);
-    if (!destCol) return res.status(403).json({ error: 'forbidden' });
-    await queries.tasks.updatePosition.run(position, column_id, id, uid);
-  }
+    // Only an explicit Touch action (_ack) bumps last_acknowledged_at.
+    // Saving notes or title is a content edit, not a deliberate "touch".
+    if (req.body._ack) {
+      await queryRun(`UPDATE tasks SET last_acknowledged_at = ${sqlNowExpr()}, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [id, uid]);
+    }
+    if (position !== undefined && column_id !== undefined) {
+      await queries.tasks.updatePosition.run(position, column_id, id, uid);
+    }
+  });
+
   res.json(await queries.tasks.byId.get(id, uid));
 });
 
@@ -1955,59 +1960,54 @@ async function syncDormantState(taskId, userId) {
 // Pass 1 — wake dormant tasks whose window has arrived.
 // Pass 2 — put active/wip tasks to sleep if they should be dormant.
 //   (Catches tasks set up before this feature existed, or created via API.)
+//
+// Two cross-user SELECTs replace the previous per-user query loops,
+// cutting DB queries from O(users × 2) fetches + O(tasks) updates
+// to O(2) fetches + O(changed tasks) updates.
 async function wakeDormantTasks() {
   const todayStr = getTodayStr();
-  const allUsers = await queries.users.all.all();
   let woken = 0, slept = 0;
 
-  for (const user of allUsers) {
-    // ── Pass 1: wake dormant tasks ─────────────────────────
-    const dormant = await queryAll(
-      `SELECT * FROM tasks WHERE user_id = ? AND status = 'dormant'`,
-      [user.id]
-    );
+  // ── Pass 1: wake dormant tasks across all users ──────────────
+  const dormant = await queryAll(`SELECT * FROM tasks WHERE status = 'dormant'`);
 
-    for (const t of dormant) {
-      // ── Snooze takes priority over all other dormancy logic ──
-      // A snoozed task has snooze_until set. When the snooze expires, clear
-      // it and wake. While active, skip normal dormancy wake logic entirely
-      // so we don't accidentally interfere with next_due / visibility_days.
-      if (t.snooze_until) {
-        if (todayStr >= t.snooze_until) {
-          await queryRun(`UPDATE tasks SET snooze_until = NULL, status = 'active', updated_at = ${sqlNowExpr()} WHERE id = ?`, [t.id]);
-          woken++;
-        }
-        // Whether expired or not, this task is handled — skip normal logic.
-        continue;
-      }
-
-      if (!t.next_due) continue;
-      // visibility_days = -1 → always visible; wake immediately
-      if (t.visibility_days === -1) {
-        await queries.tasks.updateStatus.run('active', t.id, user.id);
-        woken++;
-        continue;
-      }
-      const vd = (t.visibility_days == null || isNaN(t.visibility_days)) ? 3 : t.visibility_days;
-      const wakeDate = new Date(t.next_due + 'T12:00:00Z');
-      wakeDate.setUTCDate(wakeDate.getUTCDate() - vd);
-      if (todayStr >= wakeDate.toISOString().slice(0, 10)) {
-        await queries.tasks.updateStatus.run('active', t.id, user.id);
+  for (const t of dormant) {
+    // Snooze takes priority over all other dormancy logic.
+    // A snoozed task has snooze_until set. When the snooze expires, clear
+    // it and wake. While active, skip normal dormancy wake logic entirely.
+    if (t.snooze_until) {
+      if (todayStr >= t.snooze_until) {
+        await queryRun(`UPDATE tasks SET snooze_until = NULL, status = 'active', updated_at = ${sqlNowExpr()} WHERE id = ?`, [t.id]);
         woken++;
       }
+      continue;
     }
 
-    // ── Pass 2: put active/wip tasks to sleep if needed ────
-    const candidates = await queryAll(
-      `SELECT * FROM tasks WHERE user_id = ? AND status IN ('active','wip') AND next_due IS NOT NULL`,
-      [user.id]
-    );
+    if (!t.next_due) continue;
+    // visibility_days = -1 → always visible; wake immediately
+    if (t.visibility_days === -1) {
+      await queries.tasks.updateStatus.run('active', t.id, t.user_id);
+      woken++;
+      continue;
+    }
+    const vd = (t.visibility_days == null || isNaN(t.visibility_days)) ? 3 : t.visibility_days;
+    const wakeDate = new Date(t.next_due + 'T12:00:00Z');
+    wakeDate.setUTCDate(wakeDate.getUTCDate() - vd);
+    if (todayStr >= wakeDate.toISOString().slice(0, 10)) {
+      await queries.tasks.updateStatus.run('active', t.id, t.user_id);
+      woken++;
+    }
+  }
 
-    for (const t of candidates) {
-      if (shouldBeDormant(t)) {
-        await queries.tasks.updateStatus.run('dormant', t.id, user.id);
-        slept++;
-      }
+  // ── Pass 2: sleep active/wip tasks across all users ─────────
+  const candidates = await queryAll(
+    `SELECT * FROM tasks WHERE status IN ('active','wip') AND next_due IS NOT NULL`
+  );
+
+  for (const t of candidates) {
+    if (shouldBeDormant(t)) {
+      await queries.tasks.updateStatus.run('dormant', t.id, t.user_id);
+      slept++;
     }
   }
 
