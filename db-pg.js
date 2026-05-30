@@ -140,13 +140,13 @@ const queries = {
       VALUES (?, ?, (SELECT COALESCE(MAX(position),0)+1 FROM columns WHERE user_id = ?), ?, ?, ?, ?)
       RETURNING id
     `),
-    rename:    wrap('UPDATE columns SET name = ? WHERE id = ? AND user_id = ?'),
-    reorder:   wrap('UPDATE columns SET position = ? WHERE id = ? AND user_id = ?'),
-    move:      wrap('UPDATE columns SET x = ?, y = ? WHERE id = ? AND user_id = ?'),
-    resize:    wrap('UPDATE columns SET width = ? WHERE id = ? AND user_id = ?'),
-    setColor:  wrap('UPDATE columns SET color = ? WHERE id = ? AND user_id = ?'),
-    setHidden: wrap('UPDATE columns SET hidden = ? WHERE id = ? AND user_id = ?'),
-    setScale:  wrap('UPDATE columns SET scale = ? WHERE id = ? AND user_id = ?'),
+    rename:    wrap('UPDATE columns SET name = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    reorder:   wrap('UPDATE columns SET position = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    move:      wrap('UPDATE columns SET x = ?, y = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    resize:    wrap('UPDATE columns SET width = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    setColor:  wrap('UPDATE columns SET color = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    setHidden: wrap('UPDATE columns SET hidden = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    setScale:  wrap('UPDATE columns SET scale = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
     delete:    wrap('DELETE FROM columns WHERE id = ? AND user_id = ?'),
   },
 

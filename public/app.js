@@ -2810,16 +2810,24 @@ function paprConfirm(message, { okLabel = 'OK', danger = false } = {}) {
   return new Promise(resolve => {
     const backdrop = document.createElement('div');
     backdrop.className = 'taskpapr-dialog-backdrop';
-    backdrop.innerHTML = `
-      <div class="taskpapr-dialog" role="dialog" aria-modal="true">
-        <p>${message}</p>
-        <div class="taskpapr-dialog-btns">
-          <button class="btn-cancel">Cancel</button>
-          <button class="${danger ? 'btn-danger' : 'btn-ok'}">${okLabel}</button>
-        </div>
-      </div>`;
+    const dialog = document.createElement('div');
+    dialog.className = 'taskpapr-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const p = document.createElement('p');
+    p.textContent = message;
+    const btns = document.createElement('div');
+    btns.className = 'taskpapr-dialog-btns';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-cancel';
+    cancelBtn.textContent = 'Cancel';
+    const okBtn = document.createElement('button');
+    okBtn.className = danger ? 'btn-danger' : 'btn-ok';
+    okBtn.textContent = okLabel;
+    btns.append(cancelBtn, okBtn);
+    dialog.append(p, btns);
+    backdrop.append(dialog);
     document.body.appendChild(backdrop);
-    const [cancelBtn, okBtn] = backdrop.querySelectorAll('button');
     const close = (result) => { backdrop.remove(); resolve(result); };
     cancelBtn.addEventListener('click', () => close(false));
     okBtn.addEventListener('click',     () => close(true));
@@ -2835,18 +2843,27 @@ function paprPrompt(message, defaultValue = '') {
   return new Promise(resolve => {
     const backdrop = document.createElement('div');
     backdrop.className = 'taskpapr-dialog-backdrop';
-    backdrop.innerHTML = `
-      <div class="taskpapr-dialog" role="dialog" aria-modal="true">
-        <p>${message}</p>
-        <input type="text" value="${defaultValue.replace(/"/g, '&quot;')}" />
-        <div class="taskpapr-dialog-btns">
-          <button class="btn-cancel">Cancel</button>
-          <button class="btn-ok">OK</button>
-        </div>
-      </div>`;
+    const dialog = document.createElement('div');
+    dialog.className = 'taskpapr-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const p = document.createElement('p');
+    p.textContent = message;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = defaultValue;
+    const btns = document.createElement('div');
+    btns.className = 'taskpapr-dialog-btns';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-cancel';
+    cancelBtn.textContent = 'Cancel';
+    const okBtn = document.createElement('button');
+    okBtn.className = 'btn-ok';
+    okBtn.textContent = 'OK';
+    btns.append(cancelBtn, okBtn);
+    dialog.append(p, input, btns);
+    backdrop.append(dialog);
     document.body.appendChild(backdrop);
-    const input = backdrop.querySelector('input');
-    const [cancelBtn, okBtn] = backdrop.querySelectorAll('button');
     const close = (result) => { backdrop.remove(); resolve(result); };
     cancelBtn.addEventListener('click', () => close(null));
     okBtn.addEventListener('click',     () => close(input.value));
@@ -2956,9 +2973,11 @@ function renderNotesPreview(text) {
     notesPreview.innerHTML = '';
     return;
   }
-  // marked is loaded from CDN; fall back to plain text if not yet loaded
   if (typeof marked !== 'undefined') {
-    notesPreview.innerHTML = marked.parse(text, { breaks: true });
+    const html = marked.parse(text, { breaks: true });
+    notesPreview.innerHTML = typeof DOMPurify !== 'undefined'
+      ? DOMPurify.sanitize(html)
+      : html;
   } else {
     notesPreview.textContent = text;
   }

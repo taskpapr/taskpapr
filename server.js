@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('express-async-errors');
 
 const { AsyncLocalStorage } = require('async_hooks');
 const express    = require('express');
@@ -730,6 +731,16 @@ function requireSubscription(req, res, next) {
   return res.redirect('/pricing');
 }
 
+// ── Health check (unauthenticated) ───────────────────────────
+app.get('/health', async (req, res) => {
+  try {
+    await queryOne('SELECT 1');
+    res.json({ ok: true, uptime: process.uptime() });
+  } catch (err) {
+    res.status(503).json({ ok: false });
+  }
+});
+
 // ── Main app (auth-protected static files) ────────────────────
 app.use(requireAuth);
 app.use(requireSubscription);
@@ -965,7 +976,8 @@ app.delete('/api/keys/:id', requireAuth, async (req, res) => {
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no O/0/I/1 lookalikes
   let code = '';
-  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  const { randomBytes } = require('crypto');
+  for (let i = 0; i < 6; i++) code += chars[randomBytes(1)[0] % chars.length];
   return code;
 }
 
@@ -1368,6 +1380,8 @@ app.post('/api/tasks', rateLimitWrites, async (req, res) => {
   if (lenErr) return res.status(400).json({ error: lenErr });
   const quotaErr = await checkQuota('tasks', 'user_id', uid, LIMITS.tasks, 'Task');
   if (quotaErr) return res.status(429).json({ error: quotaErr });
+  const destCol = await queries.columns.byId.get(column_id, uid);
+  if (!destCol) return res.status(403).json({ error: 'forbidden' });
   const info = await queries.tasks.insert.run(uid, titleTrim, column_id, column_id, goal_id || null);
   res.json(await queries.tasks.byId.get(info.id, uid));
 });
@@ -1499,6 +1513,8 @@ app.patch('/api/tasks/:id', async (req, res) => {
     await queryRun(`UPDATE tasks SET last_acknowledged_at = ${sqlNowExpr()}, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [id, uid]);
   }
   if (position  !== undefined && column_id !== undefined) {
+    const destCol = await queries.columns.byId.get(column_id, uid);
+    if (!destCol) return res.status(403).json({ error: 'forbidden' });
     await queries.tasks.updatePosition.run(position, column_id, id, uid);
   }
   res.json(await queries.tasks.byId.get(id, uid));
@@ -2000,10 +2016,18 @@ async function wakeDormantTasks() {
   }
 }
 
+// ── Global error handler ──────────────────────────────────────
+// express-async-errors (loaded at startup) forwards all unhandled async
+// rejections to this middleware instead of crashing the process.
+  app.use((err, req, res, _next) => {
+    console.error('[error]', err);
+    res.status(500).json({ error: 'internal_server_error' });
+  });
+
 // ============================================================
 // Start
 // ============================================================
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`taskpapr running at http://localhost:${PORT}`);
     scheduleDailyNotifications();
     // Wake dormant tasks on startup, then hourly (Postgres: single replica via advisory lock)
@@ -2013,7 +2037,7 @@ async function wakeDormantTasks() {
         await wakeDormantTasks();
       });
     })();
-    setInterval(() => {
+    const dormancyInterval = setInterval(() => {
       void (async () => {
         await withSchedulerLock(async () => {
           await refreshPostgresJobDebugDate();
@@ -2021,6 +2045,17 @@ async function wakeDormantTasks() {
         });
       })();
     }, 60 * 60 * 1000);
+
+    function shutdown() {
+      clearInterval(dormancyInterval);
+      server.close(() => {
+        const { pool } = require('./db');
+        if (pool) pool.end().then(() => process.exit(0)).catch(() => process.exit(1));
+        else process.exit(0);
+      });
+    }
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT',  shutdown);
   });
 }
 

@@ -467,6 +467,10 @@ async function setupAuth(app) {
   setupGoogleStrategy();
   await setupOidcStrategy();
 
+  if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
+    throw new Error('SESSION_SECRET must be set in production — refusing to start with default secret');
+  }
+
   app.use(session({
     store:             new SQLiteStore({ ttl: 30 * 24 * 60 * 60 }), // 30 days
     secret:            process.env.SESSION_SECRET || 'dev-secret-change-me-in-production',
@@ -515,12 +519,17 @@ function setupAuthRoutes(app, getMeExtra) {
     app.get('/auth/google/callback',
       authRateLimit,
       passport.authenticate('google', { failureRedirect: '/login?error=not_invited' }),
-      async (req, res) => {
-        if (req.session?.pending_ref && req.user) {
-          await applyReferral(req.user.id, req.session.pending_ref).catch(() => {});
-          delete req.session.pending_ref;
-        }
-        res.redirect('/');
+      (req, res) => {
+        if (!req.user) return res.redirect('/login?error=failed');
+        const pendingRef = req.session?.pending_ref;
+        req.session.regenerate(regenerateErr => {
+          if (regenerateErr) return res.redirect('/login?error=failed');
+          req.login(req.user, loginErr => {
+            if (loginErr) return res.redirect('/login?error=failed');
+            if (pendingRef) applyReferral(req.user.id, pendingRef).catch(() => {});
+            res.redirect('/');
+          });
+        });
       }
     );
   }
@@ -534,12 +543,17 @@ function setupAuthRoutes(app, getMeExtra) {
     app.get('/auth/github/callback',
       authRateLimit,
       passport.authenticate('github', { failureRedirect: '/login?error=not_invited' }),
-      async (req, res) => {
-        if (req.session?.pending_ref && req.user) {
-          await applyReferral(req.user.id, req.session.pending_ref).catch(() => {});
-          delete req.session.pending_ref;
-        }
-        res.redirect('/');
+      (req, res) => {
+        if (!req.user) return res.redirect('/login?error=failed');
+        const pendingRef = req.session?.pending_ref;
+        req.session.regenerate(regenerateErr => {
+          if (regenerateErr) return res.redirect('/login?error=failed');
+          req.login(req.user, loginErr => {
+            if (loginErr) return res.redirect('/login?error=failed');
+            if (pendingRef) applyReferral(req.user.id, pendingRef).catch(() => {});
+            res.redirect('/');
+          });
+        });
       }
     );
   }
@@ -569,12 +583,17 @@ function setupAuthRoutes(app, getMeExtra) {
       if (!_oidcRegistered) {
         return res.status(503).send('SSO temporarily unavailable.');
       }
-      authRateLimit(req, res, () => passport.authenticate('oidc', { failureRedirect: '/login?error=not_invited' })(req, res, async () => {
-        if (req.session?.pending_ref && req.user) {
-          await applyReferral(req.user.id, req.session.pending_ref).catch(() => {});
-          delete req.session.pending_ref;
-        }
-        res.redirect('/');
+      authRateLimit(req, res, () => passport.authenticate('oidc', { failureRedirect: '/login?error=not_invited' })(req, res, () => {
+        if (!req.user) return res.redirect('/login?error=failed');
+        const pendingRef = req.session?.pending_ref;
+        req.session.regenerate(regenerateErr => {
+          if (regenerateErr) return res.redirect('/login?error=failed');
+          req.login(req.user, loginErr => {
+            if (loginErr) return res.redirect('/login?error=failed');
+            if (pendingRef) applyReferral(req.user.id, pendingRef).catch(() => {});
+            res.redirect('/');
+          });
+        });
       }));
     });
   }

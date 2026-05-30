@@ -103,7 +103,8 @@ async function run() {
         color      TEXT,
         hidden     INTEGER NOT NULL DEFAULT 0,
         scale      DOUBLE PRECISION NOT NULL DEFAULT 1,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
     console.log('[migrate] ✓ columns');
@@ -200,6 +201,13 @@ async function run() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_bookmarks_user_id ON bookmarks(user_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_expired  ON sessions(expired)`);
     console.log('[migrate] ✓ indexes');
+
+    // ── Incremental additions (safe to re-run on existing databases) ──
+    await client.query(`
+      ALTER TABLE columns ADD COLUMN IF NOT EXISTS
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `);
+    console.log('[migrate] ✓ columns.updated_at');
 
     console.log('[migrate] Migration complete ✓');
   } finally {

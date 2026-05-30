@@ -33,6 +33,6 @@ ENV DB_PATH=/data/taskpapr.db
 EXPOSE 3033
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD wget -qO- http://localhost:3033/api/columns || exit 1
+  CMD wget -qO- http://localhost:3033/health || exit 1
 
 CMD ["node", "server.js"]
