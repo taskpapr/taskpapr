@@ -194,9 +194,36 @@ module.exports = function register(app) {
   app.post('/api/tasks/reorder', async (req, res) => {
     const uid   = req.user.id;
     const items = req.body;
-    const stmt  = queries.tasks.updatePosition;
+
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ error: 'body must be an array of {id, position, column_id}' });
+    }
+    if (items.length > LIMITS.tasks) {
+      return res.status(400).json({ error: `too many items (max ${LIMITS.tasks})` });
+    }
+
+    const parsed = [];
+    for (const item of items) {
+      const id        = parseInt(item?.id);
+      const position  = parseInt(item?.position);
+      const column_id = parseInt(item?.column_id);
+      if (isNaN(id) || isNaN(position) || isNaN(column_id)) {
+        return res.status(400).json({ error: 'each item needs integer id, position, column_id' });
+      }
+      parsed.push({ id, position, column_id });
+    }
+
+    // Every referenced column must belong to the caller — otherwise a user
+    // could point their tasks at another user's columns.
+    const colIds = [...new Set(parsed.map(i => i.column_id))];
+    for (const colId of colIds) {
+      const col = await queries.columns.byId.get(colId, uid);
+      if (!col) return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const stmt = queries.tasks.updatePosition;
     await transaction(async () => {
-      for (const item of items) {
+      for (const item of parsed) {
         await stmt.run(item.position, item.column_id, item.id, uid);
       }
     });
