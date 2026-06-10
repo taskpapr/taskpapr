@@ -2,7 +2,7 @@
 
 const { randomBytes }                              = require('crypto');
 const { queries, queryOne, queryRun }              = require('../db');
-const { LIMITS, asTrimmedString, checkQuota }      = require('../lib/helpers');
+const { LIMITS, asTrimmedString, checkQuota, escapeHtml } = require('../lib/helpers');
 const { checkDueTasks, sendTelegram }              = require('../services/notifications');
 const { requireAuth, requireAdmin }                = require('../auth');
 
@@ -62,7 +62,7 @@ function registerPublic(app) {
       const linkedUser  = await queries.users.byId.get(userId);
       const displayName = linkedUser?.display_name || linkedUser?.email || 'user';
       console.log('[telegram/webhook] linked chat to user', { chatId, userId, displayName });
-      sendTelegram(`✅ Connected! Daily task reminders will now be sent to this chat.\n\nThis is your taskpapr account: ${displayName}\n\n<i>Tip: send me any message to add it as a task in your Inbox tile. Use <b>TileName: task title</b> to send to a specific tile.</i>`, chatId);
+      sendTelegram(`✅ Connected! Daily task reminders will now be sent to this chat.\n\nThis is your taskpapr account: ${escapeHtml(displayName)}\n\n<i>Tip: send me any message to add it as a task in your Inbox tile. Use <b>TileName: task title</b> to send to a specific tile.</i>`, chatId);
       return;
     }
 
@@ -96,7 +96,7 @@ function registerPublic(app) {
       if (prefixMatch) {
         // User named a tile that doesn't exist — tell them
         sendTelegram(
-          `❌ Tile not found: "<b>${targetTileName}</b>"\n\nAvailable tiles:\n${allCols.map(c => `• ${c.name}`).join('\n')}`,
+          `❌ Tile not found: "<b>${escapeHtml(targetTileName)}</b>"\n\nAvailable tiles:\n${allCols.map(c => `• ${escapeHtml(c.name)}`).join('\n')}`,
           chatId
         );
         return;
@@ -116,7 +116,7 @@ function registerPublic(app) {
     }
     await queries.tasks.insert.run(knownUser.id, taskTitle, captureTile.id, captureTile.id, null);
     console.log('[telegram/webhook] quick-capture', { userId: knownUser.id, taskTitle, tile: captureTile.name });
-    sendTelegram(`✅ Added to <b>${captureTile.name}</b>: ${taskTitle}`, chatId);
+    sendTelegram(`✅ Added to <b>${escapeHtml(captureTile.name)}</b>: ${escapeHtml(taskTitle)}`, chatId);
   });
 }
 

@@ -1,6 +1,7 @@
 'use strict';
 const { queries, queryOne, queryAll, upsertSetting, withSchedulerLock } = require('../db');
 const { getTodayStr, getNow, getDebugDate, refreshPostgresJobDebugDate } = require('../lib/date');
+const { escapeHtml } = require('../lib/helpers');
 
 // Sends a Telegram message via the Bot API (fire-and-forget, logs errors).
 async function sendTelegram(text, chatId) {
@@ -102,15 +103,15 @@ async function checkDueTasks(opts = {}) {
 
     if (overdue.length > 0) {
       lines.push(`\n<b>⚠️ Overdue:</b>`);
-      overdue.forEach(t => lines.push(`  • ${t.title} <i>[${t.tile}]</i> — was due ${t.next_due}`));
+      overdue.forEach(t => lines.push(`  • ${escapeHtml(t.title)} <i>[${escapeHtml(t.tile)}]</i> — was due ${t.next_due}`));
     }
     if (dueToday.length > 0) {
       lines.push(`\n<b>Due today (${todayStr}):</b>`);
-      dueToday.forEach(t => lines.push(`  • ${t.title} <i>[${t.tile}]</i>`));
+      dueToday.forEach(t => lines.push(`  • ${escapeHtml(t.title)} <i>[${escapeHtml(t.tile)}]</i>`));
     }
     if (dueTomorrow.length > 0) {
       lines.push(`\n<b>Due tomorrow (${tomorrowStr}):</b>`);
-      dueTomorrow.forEach(t => lines.push(`  • ${t.title} <i>[${t.tile}]</i>`));
+      dueTomorrow.forEach(t => lines.push(`  • ${escapeHtml(t.title)} <i>[${escapeHtml(t.tile)}]</i>`));
     }
 
     const message = lines.join('\n');
