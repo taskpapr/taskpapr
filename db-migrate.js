@@ -151,6 +151,8 @@ async function run() {
         rot_interval         TEXT NOT NULL DEFAULT 'weekly',
         color                TEXT,
         snooze_until         DATE,
+        today_flag           INTEGER NOT NULL DEFAULT 0,
+        today_order          INTEGER,
         created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
@@ -218,6 +220,15 @@ async function run() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     `);
     console.log('[migrate] ✓ columns.updated_at');
+
+    // Today view columns — were in db-sqlite.js but missing here until v0.45.x
+    await client.query(`
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS today_flag INTEGER NOT NULL DEFAULT 0
+    `);
+    await client.query(`
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS today_order INTEGER
+    `);
+    console.log('[migrate] ✓ tasks.today_flag / today_order');
 
     await client.query('COMMIT');
     console.log('[migrate] Migration complete ✓');

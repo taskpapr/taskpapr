@@ -18,8 +18,20 @@
 
 'use strict';
 
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 const { AsyncLocalStorage } = require('async_hooks');
+
+// node-pg returns BIGINT (int8) values — ids, COUNT(*) — as strings to avoid
+// precision loss beyond 2^53. Our ids and counts never approach that, and
+// string ids break strict comparisons everywhere (webhook id lookup, frontend
+// element matching). Parse to Number so PG mode returns the same types as the
+// SQLite adapter.
+types.setTypeParser(types.builtins.INT8, v => parseInt(v, 10));
+
+// DATE columns (next_due, snooze_until, trial_ends_at) must stay 'YYYY-MM-DD'
+// strings — the app compares them lexicographically and concatenates them into
+// ISO timestamps. node-pg's default Date-object parsing breaks both.
+types.setTypeParser(types.builtins.DATE, v => v);
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
