@@ -181,7 +181,8 @@ module.exports = function register(app) {
 
     // Run dormancy check immediately so imported tasks with future due dates
     // get the correct status (dormant/active) without waiting for the hourly tick.
-    wakeDormantTasks();
+    // Fire-and-forget, but must catch: an unhandled rejection kills the process.
+    wakeDormantTasks().catch(err => console.error('[import] dormancy sync failed:', err));
 
     emitUserChange(uid);
 

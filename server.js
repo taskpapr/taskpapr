@@ -225,21 +225,17 @@ async function start() {
 
     // Wake dormant tasks on startup, then hourly
     // (Postgres: single replica via advisory lock)
-    void (async () => {
-      await withSchedulerLock(async () => {
+    // Must catch: an unhandled rejection here (e.g. DB briefly down during the
+    // hourly tick) would terminate the whole process.
+    const runDormancySweep = () => {
+      withSchedulerLock(async () => {
         await refreshPostgresJobDebugDate();
         await wakeDormantTasks();
-      });
-    })();
+      }).catch(err => console.error('[dormant] sweep failed:', err));
+    };
 
-    const dormancyInterval = setInterval(() => {
-      void (async () => {
-        await withSchedulerLock(async () => {
-          await refreshPostgresJobDebugDate();
-          await wakeDormantTasks();
-        });
-      })();
-    }, 60 * 60 * 1000);
+    runDormancySweep();
+    const dormancyInterval = setInterval(runDormancySweep, 60 * 60 * 1000);
 
     function shutdown() {
       clearInterval(dormancyInterval);

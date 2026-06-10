@@ -194,7 +194,10 @@ function setupGitHubStrategy() {
 
         // Check whitelist (skip if first user, or if open registration is on)
         const countRow = await queries.users.count.get();
-        const userCount = countRow.c;
+        // Number(): node-pg returns COUNT(*) as a string (bigint) — without the
+        // coercion, `userCount === 0` is never true and the first user on a
+        // fresh Postgres install would not become admin.
+        const userCount = Number(countRow.c);
         if (userCount > 0 && isWhitelistRequired()) {
           if (!email) return done(null, false, { message: 'no_email' });
           const allowed = await queries.whitelist.byEmail.get(email);
@@ -260,7 +263,10 @@ function setupGoogleStrategy() {
 
         // Check whitelist (skip if first user, or if open registration is on)
         const countRow = await queries.users.count.get();
-        const userCount = countRow.c;
+        // Number(): node-pg returns COUNT(*) as a string (bigint) — without the
+        // coercion, `userCount === 0` is never true and the first user on a
+        // fresh Postgres install would not become admin.
+        const userCount = Number(countRow.c);
         if (userCount > 0 && isWhitelistRequired()) {
           if (!email) return done(null, false, { message: 'no_email' });
           const allowed = await queries.whitelist.byEmail.get(email);
@@ -378,7 +384,10 @@ async function setupOidcStrategy() {
         ).toLowerCase().trim();
 
         const countRow = await queries.users.count.get();
-        const userCount = countRow.c;
+        // Number(): node-pg returns COUNT(*) as a string (bigint) — without the
+        // coercion, `userCount === 0` is never true and the first user on a
+        // fresh Postgres install would not become admin.
+        const userCount = Number(countRow.c);
         const isFirstUser = userCount === 0;
 
         if (!isFirstUser && !trustIdp && isWhitelistRequired()) {

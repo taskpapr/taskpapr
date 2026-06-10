@@ -159,10 +159,17 @@ function scheduleDailyNotifications() {
     const nextRun = new Date(Date.now() + delay);
     console.log(`[telegram] next notification scheduled for ${nextRun.toLocaleString()} (in ${Math.round(delay / 60000)} min)`);
     setTimeout(async () => {
-      await withSchedulerLock(async () => {
-        await refreshPostgresJobDebugDate();
-        await checkDueTasks();
-      });
+      // Catch so a failed send neither crashes the process (unhandled
+      // rejection) nor breaks the scheduling chain — scheduleNext() must
+      // always run again.
+      try {
+        await withSchedulerLock(async () => {
+          await refreshPostgresJobDebugDate();
+          await checkDueTasks();
+        });
+      } catch (err) {
+        console.error('[telegram] daily notification failed:', err);
+      }
       scheduleNext();
     }, delay);
   }
@@ -171,24 +178,28 @@ function scheduleDailyNotifications() {
 
   // Startup check: fire if today's digest hasn't been sent yet and we're past the target hour.
   setTimeout(async () => {
-    const todayStr  = getTodayStr();
-    const lastSent  = await queryOne("SELECT value FROM settings WHERE key = 'telegram_last_sent'");
-    const alreadySent  = lastSent?.value === todayStr;
-    const currentHour  = new Date().getHours();
+    try {
+      const todayStr  = getTodayStr();
+      const lastSent  = await queryOne("SELECT value FROM settings WHERE key = 'telegram_last_sent'");
+      const alreadySent  = lastSent?.value === todayStr;
+      const currentHour  = new Date().getHours();
 
-    if (alreadySent) {
-      console.log(`[telegram] startup check skipped — already sent today (${todayStr})`);
-      return;
+      if (alreadySent) {
+        console.log(`[telegram] startup check skipped — already sent today (${todayStr})`);
+        return;
+      }
+      if (currentHour < targetHour) {
+        console.log(`[telegram] startup check skipped — not yet ${targetHour}:00 (current hour: ${currentHour})`);
+        return;
+      }
+      console.log('[telegram] startup check — sending missed digest…');
+      await withSchedulerLock(async () => {
+        await refreshPostgresJobDebugDate();
+        await checkDueTasks();
+      });
+    } catch (err) {
+      console.error('[telegram] startup digest check failed:', err);
     }
-    if (currentHour < targetHour) {
-      console.log(`[telegram] startup check skipped — not yet ${targetHour}:00 (current hour: ${currentHour})`);
-      return;
-    }
-    console.log('[telegram] startup check — sending missed digest…');
-    await withSchedulerLock(async () => {
-      await refreshPostgresJobDebugDate();
-      await checkDueTasks();
-    });
   }, 10_000);
 }
 

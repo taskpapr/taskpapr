@@ -19,12 +19,26 @@
 'use strict';
 
 const { Pool } = require('pg');
+const { AsyncLocalStorage } = require('async_hooks');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 pool.on('error', (err) => {
   console.error('[pg] idle client error:', err.message);
 });
+
+// ── Transaction context ───────────────────────────────────────
+// Holds the transaction's dedicated client for the duration of a
+// transaction(fn) call. Every query helper below routes through dbConn() so
+// that queries issued inside fn — including via the prepared `queries`
+// objects — run on the transaction client, not the pool. Without this, BEGIN/COMMIT
+// would wrap nothing: pool.query() hands each statement to whichever
+// connection is free, outside the transaction.
+const txStorage = new AsyncLocalStorage();
+
+function dbConn() {
+  return txStorage.getStore() || pool;
+}
 
 // ── Low-level helpers ─────────────────────────────────────────
 // Convert SQLite ? placeholders to PostgreSQL $1, $2, … placeholders.
@@ -35,38 +49,42 @@ function toPositional(sql) {
 
 // Execute a query; return the first row or null.
 async function queryOne(sql, params = []) {
-  const { rows } = await pool.query(toPositional(sql), params);
+  const { rows } = await dbConn().query(toPositional(sql), params);
   return rows[0] ?? null;
 }
 
 // Execute a query; return all rows.
 async function queryAll(sql, params = []) {
-  const { rows } = await pool.query(toPositional(sql), params);
+  const { rows } = await dbConn().query(toPositional(sql), params);
   return rows;
 }
 
 // Execute a non-returning statement (INSERT/UPDATE/DELETE).
 // Returns { id, changes } where id is from RETURNING id (if present in SQL) or null.
 async function queryRun(sql, params = []) {
-  const { rows, rowCount } = await pool.query(toPositional(sql), params);
+  const { rows, rowCount } = await dbConn().query(toPositional(sql), params);
   return { id: rows[0]?.id ?? null, changes: rowCount };
 }
 
 // Execute raw DDL (no params, no return).
 async function exec(sql) {
-  await pool.query(sql);
+  await dbConn().query(sql);
 }
 
 // ── Transaction ───────────────────────────────────────────────
+// Runs fn with a dedicated client; all query helpers called inside fn
+// (directly or via `queries`) join the transaction through txStorage.
 async function transaction(fn) {
+  // Nested call: already inside a transaction — just run in the outer one.
+  if (txStorage.getStore()) return fn();
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Inject a scoped query helper so fn() can use the same transaction client
-    await fn(client);
+    await txStorage.run(client, fn);
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
     client.release();
@@ -75,21 +93,22 @@ async function transaction(fn) {
 
 // ── Statement builder ─────────────────────────────────────────
 // Creates an object with .get/.all/.run matching the SQLite adapter interface.
-// Converts ? → $N placeholders at call time (cheap string op).
+// Converts ? → $N placeholders once; routes through dbConn() so calls made
+// inside transaction(fn) join the transaction.
 function wrap(sql) {
   const pgSql = toPositional(sql);
   return {
     get:  async (...args) => {
-      const { rows } = await pool.query(pgSql, args);
+      const { rows } = await dbConn().query(pgSql, args);
       return rows[0] ?? null;
     },
     all:  async (...args) => {
-      const { rows } = await pool.query(pgSql, args);
+      const { rows } = await dbConn().query(pgSql, args);
       return rows;
     },
     run:  async (...args) => {
       // Extract RETURNING clause rows if present
-      const { rows, rowCount } = await pool.query(pgSql, args);
+      const { rows, rowCount } = await dbConn().query(pgSql, args);
       return { id: rows[0]?.id ?? null, changes: rowCount };
     },
   };

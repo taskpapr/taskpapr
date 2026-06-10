@@ -19,7 +19,7 @@ module.exports = function register(app) {
         SELECT MAX(updated_at) AS t FROM tasks   WHERE user_id = ?
         UNION ALL
         SELECT MAX(updated_at) AS t FROM columns WHERE user_id = ?
-      )
+      ) AS sub
     `, [uid, uid]);
     res.json({ t: row?.t || null });
   });
