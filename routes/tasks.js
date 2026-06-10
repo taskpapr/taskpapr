@@ -1,9 +1,10 @@
 'use strict';
 
 const { queries, queryOne, queryRun, queryAll, transaction, sqlNowExpr } = require('../db');
-const { LIMITS, validateLen, asTrimmedString, checkQuota, advanceDate } = require('../lib/helpers');
+const { LIMITS, validateLen, asTrimmedString, checkQuota } = require('../lib/helpers');
 const { getTodayStr, getNow } = require('../lib/date');
 const { syncDormantState } = require('../services/dormancy');
+const { completeTask } = require('../services/tasks');
 const { rateLimitWrites } = require('../lib/rateLimits');
 const { emitUserChange } = require('../lib/events');
 
@@ -100,22 +101,7 @@ module.exports = function register(app) {
     await transaction(async () => {
       if (status !== undefined) {
         if (status === 'done') {
-          if (current.recurrence) {
-            // Recurring task completed:
-            // -1 = always visible → reset to active immediately (spinning-plates style)
-            // ≥0 = hide until next_due window → set dormant
-            const nextDueR = advanceDate(current.next_due || getTodayStr(), current.recurrence);
-            const alwaysVisible = (current.visibility_days === -1 || current.visibility_days == null);
-            const newStatus = alwaysVisible ? 'active' : 'dormant';
-            await queryRun(`UPDATE tasks SET status=?, last_done_at=${sqlNowExpr()}, next_due=?, updated_at=${sqlNowExpr()} WHERE id=? AND user_id=?`, [newStatus, nextDueR, id, uid]);
-          } else {
-            await queries.tasks.updateStatus.run(status, id, uid);
-          }
-          // Completing a task removes it from the Today view immediately.
-          // today_flag is cleared; today_order is left in place (harmless, reused if
-          // the task is un-done). For recurring tasks the flag also clears — the
-          // reset task starts the next cycle unflagged.
-          await queryRun("UPDATE tasks SET today_flag = 0 WHERE id = ? AND user_id = ?", [id, uid]);
+          await completeTask(current, uid);
         } else {
           await queries.tasks.updateStatus.run(status, id, uid);
         }

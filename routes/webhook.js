@@ -2,6 +2,7 @@
 
 const { queries } = require('../db');
 const { LIMITS, validateLen, asTrimmedString, checkQuota } = require('../lib/helpers');
+const { completeTask } = require('../services/tasks');
 const { rateLimitWrites } = require('../lib/rateLimits');
 const { emitUserChange } = require('../lib/events');
 
@@ -80,9 +81,13 @@ module.exports = function register(app) {
       }
 
       if (action === 'complete') {
-        await queries.tasks.updateStatus.run('done', task.id, uid);
+        // Same path as the UI checkbox — recurring tasks advance next_due
+        // and reset instead of staying 'done'. Return the real resulting
+        // state, not an assumed one.
+        await completeTask(task, uid);
+        const updated = await queries.tasks.byId.get(task.id, uid);
         emitUserChange(uid);
-        return res.json({ ok: true, task: { ...task, status: 'done' } });
+        return res.json({ ok: true, task: updated });
       }
       if (action === 'mark_wip') {
         await queries.tasks.updateStatus.run('wip', task.id, uid);
