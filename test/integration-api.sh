@@ -259,6 +259,66 @@ curl -s -X DELETE "$BASE/api/bookmarks/$BM2_ID" >/dev/null 2>&1 || true
 curl -s -X DELETE "$BASE/api/bookmarks/$BM3_ID" >/dev/null 2>&1 || true
 
 echo ""
+echo "── Reorder validation ────────────────────"
+
+RC=$(status -X POST "$BASE/api/tasks/reorder" -H "Content-Type: application/json" -d '{"not":"an array"}')
+assert_equals "Reorder rejects non-array body" "400" "$RC"
+
+RC=$(status -X POST "$BASE/api/tasks/reorder" -H "Content-Type: application/json" -d '[{"id":"x","position":1,"column_id":1}]')
+assert_equals "Reorder rejects non-integer fields" "400" "$RC"
+
+RC=$(status -X POST "$BASE/api/tasks/reorder" -H "Content-Type: application/json" -d '[{"id":1,"position":1,"column_id":999999}]')
+assert_equals "Reorder rejects unknown/foreign column" "403" "$RC"
+
+echo ""
+echo "── Export / import round-trip (v2 fields) ─"
+
+info "Creating round-trip tile + task with extended fields"
+RT_COL=$(body -X POST "$BASE/api/columns" -H "Content-Type: application/json" \
+  -d '{"name":"RT Roundtrip Tile","x":900,"y":900}')
+assert_json_has "Create round-trip tile" "$RT_COL"
+RT_COL_ID=$(echo "$RT_COL" | jq -r '.id')
+
+curl -s -X PATCH "$BASE/api/columns/$RT_COL_ID" -H "Content-Type: application/json" \
+  -d '{"hidden":true,"scale":1.3}' >/dev/null
+
+RT_TASK=$(body -X POST "$BASE/api/tasks" -H "Content-Type: application/json" \
+  -d '{"title":"RT task <&> tricky","column_id":'"$RT_COL_ID"'}')
+assert_json_has "Create round-trip task" "$RT_TASK"
+RT_TASK_ID=$(echo "$RT_TASK" | jq -r '.id')
+
+curl -s -X PATCH "$BASE/api/tasks/$RT_TASK_ID" -H "Content-Type: application/json" \
+  -d '{"color":"#fff0f0","visibility_days":5,"no_rot":true,"rot_interval":"monthly","today_flag":true,"notes":"rt notes"}' >/dev/null
+
+EXPORT=$(body "$BASE/api/export")
+assert_json_has "GET /api/export" "$EXPORT"
+assert_equals "Export version is 2" "2" "$(echo "$EXPORT" | jq -r '.version')"
+
+info "Deleting the tile, then re-importing (merge)"
+curl -s -X DELETE "$BASE/api/columns/$RT_COL_ID" >/dev/null
+
+IMPORT=$(echo "$EXPORT" | curl -s -X POST "$BASE/api/import?mode=merge" \
+  -H "Content-Type: application/json" -d @-)
+assert_json_has "POST /api/import (merge)" "$IMPORT"
+
+RT_AFTER=$(body "$BASE/api/columns" | jq '[.[] | select(.name=="RT Roundtrip Tile")][0]')
+assert_equals "Round-trip restores hidden flag" "1"   "$(echo "$RT_AFTER" | jq -r '.hidden')"
+assert_equals "Round-trip restores scale"       "1.3" "$(echo "$RT_AFTER" | jq -r '.scale')"
+RT_COL_ID2=$(echo "$RT_AFTER" | jq -r '.id')
+
+RT_TASK_AFTER=$(body "$BASE/api/tasks" | jq '[.[] | select(.column_id=='"$RT_COL_ID2"')][0]')
+assert_equals "Round-trip restores title"           "RT task <&> tricky" "$(echo "$RT_TASK_AFTER" | jq -r '.title')"
+assert_equals "Round-trip restores color"           "#fff0f0" "$(echo "$RT_TASK_AFTER" | jq -r '.color')"
+assert_equals "Round-trip restores visibility_days" "5"       "$(echo "$RT_TASK_AFTER" | jq -r '.visibility_days')"
+assert_equals "Round-trip restores no_rot"          "1"       "$(echo "$RT_TASK_AFTER" | jq -r '.no_rot')"
+assert_equals "Round-trip restores rot_interval"    "monthly" "$(echo "$RT_TASK_AFTER" | jq -r '.rot_interval')"
+assert_equals "Round-trip restores today_flag"      "1"       "$(echo "$RT_TASK_AFTER" | jq -r '.today_flag')"
+assert_equals "Round-trip restores notes"           "rt notes" "$(echo "$RT_TASK_AFTER" | jq -r '.notes')"
+
+info "Cleaning up round-trip tile"
+curl -s -X DELETE "$BASE/api/columns/$RT_COL_ID2" >/dev/null 2>&1 || true
+
+echo ""
 echo "────────────────────────────────────────"
 echo "Results: ${PASS} passed, ${FAIL} failed"
 if [[ "$FAIL" -ne 0 ]]; then

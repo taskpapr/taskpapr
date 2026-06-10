@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { queries, queryOne, queryRun, transaction } = require('../db');
+const { queries, queryRun, transaction } = require('../db');
 const { rateLimitWrites } = require('../lib/rateLimits');
 const { wakeDormantTasks } = require('../services/dormancy');
 const { emitUserChange } = require('../lib/events');
@@ -18,8 +18,11 @@ module.exports = function register(app) {
     const columns = await queries.columns.all.all(uid);
     const tasks   = await queries.tasks.all.all(uid);
 
+    // v2: includes every user-visible field so export → import round-trips
+    // without losing tile visibility/scale or task rot/colour/today settings
+    // (Design Tenet 5: the board tells the truth). v1 files remain importable.
     const payload = {
-      version:           '1',
+      version:           '2',
       exported_at:       new Date().toISOString(),
       taskpapr_version:  require(path.join(__dirname, '..', 'package.json')).version,
       goals: goals.map(g => ({
@@ -34,19 +37,28 @@ module.exports = function register(app) {
         width:    col.width,
         color:    col.color || null,
         position: col.position,
+        hidden:   col.hidden ? 1 : 0,
+        scale:    col.scale ?? 1,
         tasks:    tasks
           .filter(t => t.column_id === col.id)
           .map(t => {
             const goal = goals.find(g => g.id === t.goal_id);
             return {
-              title:       t.title,
-              status:      t.status,
-              position:    t.position,
-              goal:        goal ? goal.title : null,
-              notes:       t.notes       || null,
-              next_due:    t.next_due    || null,
-              recurrence:  t.recurrence  || null,
-              created_at:  t.created_at,
+              title:                t.title,
+              status:               t.status,
+              position:             t.position,
+              goal:                 goal ? goal.title : null,
+              notes:                t.notes       || null,
+              next_due:             t.next_due    || null,
+              recurrence:           t.recurrence  || null,
+              color:                t.color       || null,
+              visibility_days:      t.visibility_days ?? 3,
+              no_rot:               t.no_rot ? 1 : 0,
+              rot_interval:         t.rot_interval || 'weekly',
+              today_flag:           t.today_flag ? 1 : 0,
+              snooze_until:         t.snooze_until || null,
+              last_acknowledged_at: t.last_acknowledged_at || null,
+              created_at:           t.created_at,
             };
           }),
       })),
@@ -141,9 +153,13 @@ module.exports = function register(app) {
           counts.tiles++;
         }
 
-        // Apply tile-level hidden flag if present
+        // Apply tile-level hidden flag and scale if present (v2 exports)
         if (tile.hidden) {
           await queryRun('UPDATE columns SET hidden = 1 WHERE id = ? AND user_id = ?', [colId, uid]);
+        }
+        if (typeof tile.scale === 'number' && tile.scale !== 1) {
+          const scale = Math.max(0.5, Math.min(2.0, tile.scale));
+          await queryRun('UPDATE columns SET scale = ? WHERE id = ? AND user_id = ?', [scale, colId, uid]);
         }
 
         // Import tasks for this tile
@@ -151,28 +167,41 @@ module.exports = function register(app) {
           for (const t of tile.tasks) {
             if (typeof t.title !== 'string' || !t.title.trim()) { counts.skipped++; continue; }
 
-            const validStatuses = ['active', 'wip', 'done'];
+            const validStatuses = ['active', 'wip', 'done', 'dormant'];
             const status  = validStatuses.includes(t.status) ? t.status : 'active';
             const goalId  = (t.goal && goalMap[t.goal]) ? goalMap[t.goal] : null;
 
-            await queries.tasks.insert.run(uid, t.title.trim(), colId, colId, goalId);
+            const info      = await queries.tasks.insert.run(uid, t.title.trim(), colId, colId, goalId);
+            const newTaskId = info.id;
 
-            // Fetch the task we just inserted so we can patch extended fields
-            const newTask = await queryOne(
-              'SELECT id FROM tasks WHERE user_id = ? AND column_id = ? ORDER BY id DESC LIMIT 1',
-              [uid, colId]
-            );
-
-            if (newTask) {
-              // Patch status (insert always sets 'active')
-              if (status !== 'active') {
-                await queries.tasks.updateStatus.run(status, newTask.id, uid);
-              }
-              // Patch notes, next_due, recurrence if provided in the import
-              if (t.notes)      await queryRun("UPDATE tasks SET notes      = ? WHERE id = ? AND user_id = ?", [t.notes,      newTask.id, uid]);
-              if (t.next_due)   await queryRun("UPDATE tasks SET next_due   = ? WHERE id = ? AND user_id = ?", [t.next_due,   newTask.id, uid]);
-              if (t.recurrence) await queryRun("UPDATE tasks SET recurrence = ? WHERE id = ? AND user_id = ?", [t.recurrence, newTask.id, uid]);
+            // Patch status (insert always sets 'active')
+            if (status !== 'active') {
+              await queries.tasks.updateStatus.run(status, newTaskId, uid);
             }
+
+            // Extended fields — absent in v1 files, so every field falls back
+            // to the schema default the insert already produced
+            const vd = parseInt(t.visibility_days);
+            await queryRun(
+              `UPDATE tasks SET
+                 notes = ?, next_due = ?, recurrence = ?, color = ?,
+                 visibility_days = ?, no_rot = ?, rot_interval = ?,
+                 today_flag = ?, snooze_until = ?, last_acknowledged_at = ?
+               WHERE id = ? AND user_id = ?`,
+              [
+                (typeof t.notes      === 'string' && t.notes)      ? t.notes      : null,
+                (typeof t.next_due   === 'string' && t.next_due)   ? t.next_due   : null,
+                (typeof t.recurrence === 'string' && t.recurrence) ? t.recurrence : null,
+                (typeof t.color      === 'string' && t.color)      ? t.color      : null,
+                isNaN(vd) ? 3 : vd,
+                t.no_rot ? 1 : 0,
+                (typeof t.rot_interval === 'string' && t.rot_interval) ? t.rot_interval : 'weekly',
+                t.today_flag ? 1 : 0,
+                (typeof t.snooze_until === 'string' && t.snooze_until) ? t.snooze_until : null,
+                (typeof t.last_acknowledged_at === 'string' && t.last_acknowledged_at) ? t.last_acknowledged_at : null,
+                newTaskId, uid,
+              ]
+            );
             counts.tasks++;
           }
         }
