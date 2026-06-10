@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     branches: ["main"]
+  # No branch filter: stacked PRs (feature → feature) must run CI too,
+  # not just PRs targeting main.
   pull_request:
-    branches: ["main"]
 
 jobs:
   smoke-test:
