@@ -3330,9 +3330,20 @@ async function pollForChanges() {
 // The server pushes `data: change\n\n` after every write. EventSource
 // auto-reconnects on connection loss. A 5-minute fallback poll catches
 // edge cases (proxy buffering, missed events, server restart).
+//
+// Refreshes are coalesced: every write echoes back to the writer too, and
+// multi-step actions (drag + reorder, import) emit several events in quick
+// succession — one deferred refresh covers the burst instead of refetching
+// five endpoints per event.
+let _sseRefreshTimer = null;
+
 (function startSse() {
   const es = new EventSource('/api/events');
-  es.onmessage = (e) => { if (e.data === 'change') pollForChanges(); };
+  es.onmessage = (e) => {
+    if (e.data !== 'change') return;
+    clearTimeout(_sseRefreshTimer);
+    _sseRefreshTimer = setTimeout(pollForChanges, 400);
+  };
   es.onerror = () => {
     // On persistent error, close and schedule a manual reconnect.
     // (EventSource auto-reconnects for transient failures; this handles

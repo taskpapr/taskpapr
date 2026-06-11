@@ -90,6 +90,11 @@ function requireSubscription(req, res, next) {
 }
 
 // ── Public routes (before requireAuth) ───────────────────────
+// Favicon — the static middleware mounts behind requireAuth, so public pages
+// (/login, /pricing) need this served explicitly or logged-out visitors get
+// a redirect instead of an icon.
+app.get('/favicon.svg', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'favicon.svg')));
+
 // Pricing pages — expired-trial users must reach /pricing
 app.get('/pricing', (req, res) => {
   if (req.query.ref && req.session) req.session.pending_ref = req.query.ref;
