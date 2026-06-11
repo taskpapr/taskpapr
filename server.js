@@ -55,8 +55,28 @@ const PORT = process.env.PORT || 3033;
 app.set('trust proxy', 1);
 
 // ── Security headers ──────────────────────────────────────────
-// CSP is disabled because pages use inline scripts (no build step — intentional).
-app.use(helmet({ contentSecurityPolicy: false }));
+// All page scripts are external files under /js (no build step, no inline
+// <script> blocks), so script-src can be 'self' — injected inline scripts,
+// the main XSS vector, are blocked. Styles stay 'unsafe-inline': pages use
+// <style> blocks and generated style="" attributes, which CSS can't be
+// exploited through the way script can. img-src allows https for OAuth
+// avatars (GitHub/Google/any OIDC IdP host).
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc:     ["'self'"],
+      scriptSrc:      ["'self'"],
+      styleSrc:       ["'self'", "'unsafe-inline'"],
+      imgSrc:         ["'self'", 'data:', 'https:'],
+      connectSrc:     ["'self'"],
+      objectSrc:      ["'none'"],
+      baseUri:        ["'self'"],
+      formAction:     ["'self'"],
+      frameAncestors: ["'self'"],
+    },
+  },
+}));
 
 // ── Global rate limit ─────────────────────────────────────────
 app.use(rateLimitGlobal);
@@ -94,6 +114,10 @@ function requireSubscription(req, res, next) {
 // (/login, /pricing) need this served explicitly or logged-out visitors get
 // a redirect instead of an icon.
 app.get('/favicon.svg', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'favicon.svg')));
+
+// Page scripts — served before requireAuth because /login and /pricing load
+// theirs while logged out. Nothing under /js is secret (the repo is public).
+app.use('/js', express.static(path.join(__dirname, 'public', 'js')));
 
 // Pricing pages — expired-trial users must reach /pricing
 app.get('/pricing', (req, res) => {
