@@ -39,6 +39,9 @@ async function setTrialEndDate(userId, extraDays = 0) {
 
 // Generate a short unique referral code for a user, e.g. "james-x7k2"
 // Falls back to a random code if display_name is absent or too short.
+// Accepted race: check-then-set isn't atomic, but a collision needs two users
+// with the same name slug AND the same 4-char suffix in the same instant;
+// the userId-based fallback keeps even that from failing hard.
 async function generateReferralCode(userId) {
   const user = await queries.users.byId.get(userId);
   const base = (user?.display_name || user?.email || 'user')

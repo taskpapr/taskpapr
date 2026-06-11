@@ -156,6 +156,8 @@ Make sure you messaged the bot at least once from your Telegram account *before*
 **Wrong time zone**
 `TELEGRAM_NOTIFY_HOUR` uses the server's local time. If your server is set to UTC and you want 8am London time, set `TELEGRAM_NOTIFY_HOUR=8` and ensure your server's timezone is correct (`timedatectl` on Linux), or adjust the hour to match UTC offset.
 
+Note that the digest's "due today / due tomorrow" buckets use **UTC calendar dates** (the same dates shown on the board). In timezones far ahead of UTC (e.g. UTC+12/+13), an early-morning digest fires while UTC is still on the previous day — if that affects you, set `TELEGRAM_NOTIFY_HOUR` to a later hour so the digest fires after the UTC date rolls over.
+
 **I got a `403 Forbidden` from the Telegram API**
 The user hasn't messaged the bot yet. Telegram bots can only send messages to users who have initiated a conversation first. Ask the user to send any message to the bot, then retry.
 

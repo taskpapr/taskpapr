@@ -223,15 +223,27 @@ function exec(sql) {
 }
 
 // ── Transaction ───────────────────────────────────────────────
-async function transaction(fn) {
-  _db.exec('BEGIN');
-  try {
-    await fn();
-    _db.exec('COMMIT');
-  } catch (err) {
-    _db.exec('ROLLBACK');
-    throw err;
-  }
+// All transactions share the single connection, so they must never
+// interleave. Today every wrapped call is synchronous under the hood
+// (microtask-only awaits), which happens to make overlap impossible — but
+// that invariant is one stray fetch/timer inside a callback away from
+// silently breaking. Serialize through a promise chain so concurrent
+// transaction() calls queue instead of corrupting each other's BEGIN/COMMIT.
+let _txQueue = Promise.resolve();
+
+function transaction(fn) {
+  const run = _txQueue.then(async () => {
+    _db.exec('BEGIN');
+    try {
+      await fn();
+      _db.exec('COMMIT');
+    } catch (err) {
+      _db.exec('ROLLBACK');
+      throw err;
+    }
+  });
+  _txQueue = run.catch(() => {}); // keep the chain alive after a rollback
+  return run;
 }
 
 // ── HA: SQLite is always single-process — no cross-instance lock needed

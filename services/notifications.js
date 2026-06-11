@@ -138,6 +138,12 @@ async function checkDueTasks(opts = {}) {
 
 // Schedule daily notification at a target hour (default 08:00 local time).
 // Runs once shortly after startup, then every 24h aligned to the target hour.
+//
+// Timezone note: the firing time is SERVER-LOCAL (what users expect from
+// TELEGRAM_NOTIFY_HOUR), but the due-date buckets in checkDueTasks() use UTC
+// calendar dates — consistent with the board and the dormancy sweep. The two
+// only visibly diverge in timezones far ahead of UTC; documented in
+// docs/telegram-setup.md rather than special-cased here.
 function scheduleDailyNotifications() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
