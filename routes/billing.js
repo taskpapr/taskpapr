@@ -172,16 +172,20 @@ function registerPublic(app) {
         return res.status(400).json({ error: `webhook error: ${err.message}` });
       }
 
-      // Always respond 200 quickly so Stripe doesn't retry while we process
-      res.json({ received: true });
-
+      // Process BEFORE acknowledging. A 200 tells Stripe to never retry, so
+      // responding first meant a thrown handler lost the event forever. On
+      // failure return 500 and let Stripe retry — the handlers are idempotent
+      // (status upserts; referral credit guarded by converted_at IS NULL).
       console.log(`[stripe/webhook] event: ${event.type}`);
 
       try {
         await handleStripeEvent(event);
       } catch (err) {
         console.error('[stripe/webhook] handler error:', err.message);
+        return res.status(500).json({ error: 'event handler failed — Stripe will retry' });
       }
+
+      res.json({ received: true });
     }
   );
 }

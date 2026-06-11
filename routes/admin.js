@@ -5,7 +5,6 @@ const { queries, queryOne, queryRun } = require('../db');
 const { asTrimmedString, asLowerTrimmedString } = require('../lib/helpers');
 const { setDebugDate } = require('../lib/date');
 const { requireAuth, requireAdmin, generateApiKey } = require('../auth');
-const { checkDueTasks } = require('../services/notifications');
 
 module.exports = function register(app) {
 
@@ -62,25 +61,9 @@ module.exports = function register(app) {
     res.json({ ok: true });
   });
 
-  // API key management (admin or self)
-  app.get('/api/admin/api-keys', requireAdmin, async (req, res) => {
-    res.json(await queries.apiKeys.allForUser.all(req.user.id));
-  });
-
-  app.post('/api/admin/api-keys', requireAdmin, async (req, res) => {
-    const { name } = req.body;
-    const nameTrim = asTrimmedString(name);
-    if (!nameTrim) return res.status(400).json({ error: 'name required' });
-    const { raw, hash, prefix } = generateApiKey();
-    await queries.apiKeys.insert.run(req.user.id, nameTrim, hash, prefix);
-    // Return the raw key ONCE — it is never retrievable again
-    res.json({ name: nameTrim, key: raw, prefix, note: 'Save this key — it will not be shown again.' });
-  });
-
-  app.delete('/api/admin/api-keys/:id', requireAdmin, async (req, res) => {
-    await queries.apiKeys.delete.run(parseInt(req.params.id), req.user.id);
-    res.json({ ok: true });
-  });
+  // API key management lives at /api/keys (below) — one canonical route for
+  // all users, scoped to their own keys. The old /api/admin/api-keys trio was
+  // an exact duplicate and is gone (Design Tenet 3).
 
   // Admin UI page
   app.get('/admin', requireAdmin, async (req, res) => {
@@ -132,12 +115,6 @@ module.exports = function register(app) {
     await setDebugDate(null);
     console.log('[debug] date override cleared');
     res.json({ ok: true, debug_date: null });
-  });
-
-  // Keep legacy admin path as alias so existing admin.html JS still works
-  app.post('/api/admin/telegram/test', requireAdmin, async (req, res) => {
-    const result = await checkDueTasks({ testMode: true, userId: req.user.id });
-    res.json(result);
   });
 
 };

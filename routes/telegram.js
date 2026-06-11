@@ -4,7 +4,7 @@ const { randomBytes }                              = require('crypto');
 const { queries, queryOne, queryRun }              = require('../db');
 const { LIMITS, asTrimmedString, checkQuota, escapeHtml } = require('../lib/helpers');
 const { checkDueTasks, sendTelegram }              = require('../services/notifications');
-const { requireAuth, requireAdmin }                = require('../auth');
+const { requireAuth }                              = require('../auth');
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -157,12 +157,6 @@ function registerAuth(app) {
 
   // POST /api/telegram/test — send a test notification to the calling user's chat
   app.post('/api/telegram/test', requireAuth, async (req, res) => {
-    const result = await checkDueTasks({ testMode: true, userId: req.user.id });
-    res.json(result);
-  });
-
-  // Keep legacy admin path as alias so existing admin.html JS still works
-  app.post('/api/admin/telegram/test', requireAdmin, async (req, res) => {
     const result = await checkDueTasks({ testMode: true, userId: req.user.id });
     res.json(result);
   });

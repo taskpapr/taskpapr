@@ -23,6 +23,11 @@ const DB_PATH = process.env.DB_PATH || (() => {
 
 const _db = new DatabaseSync(DB_PATH);
 _db.exec('PRAGMA foreign_keys = ON');
+// WAL: readers don't block the writer (SSE-triggered re-fetches happen
+// mid-write); busy_timeout: wait instead of throwing SQLITE_BUSY if another
+// process (e.g. a CLI inspection) briefly holds the file.
+_db.exec('PRAGMA journal_mode = WAL');
+_db.exec('PRAGMA busy_timeout = 5000');
 
 // ── Schema ────────────────────────────────────────────────────
 _db.exec(`
@@ -171,6 +176,17 @@ addColumnIfMissing('bookmarks', 'y',          'REAL NOT NULL DEFAULT 0');
 addColumnIfMissing('bookmarks', 'zoom',       'REAL NOT NULL DEFAULT 1');
 addColumnIfMissing('bookmarks', 'position',   'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('bookmarks', 'created_at', 'TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP');
+
+// ── Indexes (parity with db-migrate.js) ───────────────────────
+// After the column migrations above — user_id may have just been added.
+_db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_tasks_user_id     ON tasks(user_id);
+  CREATE INDEX IF NOT EXISTS idx_tasks_column_id   ON tasks(column_id);
+  CREATE INDEX IF NOT EXISTS idx_columns_user_id   ON columns(user_id);
+  CREATE INDEX IF NOT EXISTS idx_goals_user_id     ON goals(user_id);
+  CREATE INDEX IF NOT EXISTS idx_bookmarks_user_id ON bookmarks(user_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_expired  ON sessions(expired);
+`);
 
 // Clear debug date on startup
 _db.prepare("DELETE FROM settings WHERE key = 'debug_date'").run();
