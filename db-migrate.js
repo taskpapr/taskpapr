@@ -31,6 +31,16 @@ async function run() {
   try {
     console.log('[migrate] Connected to PostgreSQL:', process.env.DATABASE_URL.replace(/:\/\/[^@]+@/, '://***@'));
 
+    await client.query('BEGIN');
+
+    // ── Migration version tracking ─────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version    INTEGER PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
     // ── Core schema ────────────────────────────────────────────
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -103,7 +113,8 @@ async function run() {
         color      TEXT,
         hidden     INTEGER NOT NULL DEFAULT 0,
         scale      DOUBLE PRECISION NOT NULL DEFAULT 1,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
     console.log('[migrate] ✓ columns');
@@ -140,6 +151,8 @@ async function run() {
         rot_interval         TEXT NOT NULL DEFAULT 'weekly',
         color                TEXT,
         snooze_until         DATE,
+        today_flag           INTEGER NOT NULL DEFAULT 0,
+        today_order          INTEGER,
         created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
@@ -201,7 +214,27 @@ async function run() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sessions_expired  ON sessions(expired)`);
     console.log('[migrate] ✓ indexes');
 
+    // ── Incremental additions (safe to re-run on existing databases) ──
+    await client.query(`
+      ALTER TABLE columns ADD COLUMN IF NOT EXISTS
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `);
+    console.log('[migrate] ✓ columns.updated_at');
+
+    // Today view columns — were in db-sqlite.js but missing here until v0.45.x
+    await client.query(`
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS today_flag INTEGER NOT NULL DEFAULT 0
+    `);
+    await client.query(`
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS today_order INTEGER
+    `);
+    console.log('[migrate] ✓ tasks.today_flag / today_order');
+
+    await client.query('COMMIT');
     console.log('[migrate] Migration complete ✓');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
   } finally {
     client.release();
     await pool.end();

@@ -18,13 +18,39 @@
 
 'use strict';
 
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+const { AsyncLocalStorage } = require('async_hooks');
+
+// node-pg returns BIGINT (int8) values — ids, COUNT(*) — as strings to avoid
+// precision loss beyond 2^53. Our ids and counts never approach that, and
+// string ids break strict comparisons everywhere (webhook id lookup, frontend
+// element matching). Parse to Number so PG mode returns the same types as the
+// SQLite adapter.
+types.setTypeParser(types.builtins.INT8, v => parseInt(v, 10));
+
+// DATE columns (next_due, snooze_until, trial_ends_at) must stay 'YYYY-MM-DD'
+// strings — the app compares them lexicographically and concatenates them into
+// ISO timestamps. node-pg's default Date-object parsing breaks both.
+types.setTypeParser(types.builtins.DATE, v => v);
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 pool.on('error', (err) => {
   console.error('[pg] idle client error:', err.message);
 });
+
+// ── Transaction context ───────────────────────────────────────
+// Holds the transaction's dedicated client for the duration of a
+// transaction(fn) call. Every query helper below routes through dbConn() so
+// that queries issued inside fn — including via the prepared `queries`
+// objects — run on the transaction client, not the pool. Without this, BEGIN/COMMIT
+// would wrap nothing: pool.query() hands each statement to whichever
+// connection is free, outside the transaction.
+const txStorage = new AsyncLocalStorage();
+
+function dbConn() {
+  return txStorage.getStore() || pool;
+}
 
 // ── Low-level helpers ─────────────────────────────────────────
 // Convert SQLite ? placeholders to PostgreSQL $1, $2, … placeholders.
@@ -35,38 +61,42 @@ function toPositional(sql) {
 
 // Execute a query; return the first row or null.
 async function queryOne(sql, params = []) {
-  const { rows } = await pool.query(toPositional(sql), params);
+  const { rows } = await dbConn().query(toPositional(sql), params);
   return rows[0] ?? null;
 }
 
 // Execute a query; return all rows.
 async function queryAll(sql, params = []) {
-  const { rows } = await pool.query(toPositional(sql), params);
+  const { rows } = await dbConn().query(toPositional(sql), params);
   return rows;
 }
 
 // Execute a non-returning statement (INSERT/UPDATE/DELETE).
 // Returns { id, changes } where id is from RETURNING id (if present in SQL) or null.
 async function queryRun(sql, params = []) {
-  const { rows, rowCount } = await pool.query(toPositional(sql), params);
+  const { rows, rowCount } = await dbConn().query(toPositional(sql), params);
   return { id: rows[0]?.id ?? null, changes: rowCount };
 }
 
 // Execute raw DDL (no params, no return).
 async function exec(sql) {
-  await pool.query(sql);
+  await dbConn().query(sql);
 }
 
 // ── Transaction ───────────────────────────────────────────────
+// Runs fn with a dedicated client; all query helpers called inside fn
+// (directly or via `queries`) join the transaction through txStorage.
 async function transaction(fn) {
+  // Nested call: already inside a transaction — just run in the outer one.
+  if (txStorage.getStore()) return fn();
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Inject a scoped query helper so fn() can use the same transaction client
-    await fn(client);
+    await txStorage.run(client, fn);
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
     client.release();
@@ -75,21 +105,22 @@ async function transaction(fn) {
 
 // ── Statement builder ─────────────────────────────────────────
 // Creates an object with .get/.all/.run matching the SQLite adapter interface.
-// Converts ? → $N placeholders at call time (cheap string op).
+// Converts ? → $N placeholders once; routes through dbConn() so calls made
+// inside transaction(fn) join the transaction.
 function wrap(sql) {
   const pgSql = toPositional(sql);
   return {
     get:  async (...args) => {
-      const { rows } = await pool.query(pgSql, args);
+      const { rows } = await dbConn().query(pgSql, args);
       return rows[0] ?? null;
     },
     all:  async (...args) => {
-      const { rows } = await pool.query(pgSql, args);
+      const { rows } = await dbConn().query(pgSql, args);
       return rows;
     },
     run:  async (...args) => {
       // Extract RETURNING clause rows if present
-      const { rows, rowCount } = await pool.query(pgSql, args);
+      const { rows, rowCount } = await dbConn().query(pgSql, args);
       return { id: rows[0]?.id ?? null, changes: rowCount };
     },
   };
@@ -140,13 +171,13 @@ const queries = {
       VALUES (?, ?, (SELECT COALESCE(MAX(position),0)+1 FROM columns WHERE user_id = ?), ?, ?, ?, ?)
       RETURNING id
     `),
-    rename:    wrap('UPDATE columns SET name = ? WHERE id = ? AND user_id = ?'),
-    reorder:   wrap('UPDATE columns SET position = ? WHERE id = ? AND user_id = ?'),
-    move:      wrap('UPDATE columns SET x = ?, y = ? WHERE id = ? AND user_id = ?'),
-    resize:    wrap('UPDATE columns SET width = ? WHERE id = ? AND user_id = ?'),
-    setColor:  wrap('UPDATE columns SET color = ? WHERE id = ? AND user_id = ?'),
-    setHidden: wrap('UPDATE columns SET hidden = ? WHERE id = ? AND user_id = ?'),
-    setScale:  wrap('UPDATE columns SET scale = ? WHERE id = ? AND user_id = ?'),
+    rename:    wrap('UPDATE columns SET name = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    reorder:   wrap('UPDATE columns SET position = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    move:      wrap('UPDATE columns SET x = ?, y = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    resize:    wrap('UPDATE columns SET width = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    setColor:  wrap('UPDATE columns SET color = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    setHidden: wrap('UPDATE columns SET hidden = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
+    setScale:  wrap('UPDATE columns SET scale = ?, updated_at = NOW() WHERE id = ? AND user_id = ?'),
     delete:    wrap('DELETE FROM columns WHERE id = ? AND user_id = ?'),
   },
 

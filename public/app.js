@@ -58,6 +58,13 @@ let zTop = 10;
 function bringToFront(colEl) {
   zTop++;
   colEl.style.zIndex = zTop;
+  if (zTop > 1000) {
+    const cols = [...document.querySelectorAll('.column')].sort(
+      (a, b) => (+a.style.zIndex || 0) - (+b.style.zIndex || 0)
+    );
+    cols.forEach((c, i) => { c.style.zIndex = 10 + i; });
+    zTop = 10 + cols.length;
+  }
 }
 
 const canvas   = document.getElementById('board-canvas');
@@ -719,8 +726,12 @@ function refreshColumn(el, col) {
   // Rebuild the inner content but keep the element itself (so drag state isn't lost)
   const wasDragging = el.classList.contains('col-dragging');
 
-  // Bring to front on any interaction (re-attach after refresh)
-  el.addEventListener('mousedown', () => bringToFront(el), true);
+  // Skip re-render if user has an active edit inside this column — avoids stomping
+  // in-progress title edits (contentEditable) or the add-task input.
+  // The next poll cycle will pick up server state once the edit completes.
+  if (el.contains(document.activeElement) &&
+      (document.activeElement.contentEditable === 'true' ||
+       document.activeElement.tagName === 'INPUT')) return;
 
   // Replace header
   const oldHeader = el.querySelector('.column-header');
@@ -2799,16 +2810,24 @@ function paprConfirm(message, { okLabel = 'OK', danger = false } = {}) {
   return new Promise(resolve => {
     const backdrop = document.createElement('div');
     backdrop.className = 'taskpapr-dialog-backdrop';
-    backdrop.innerHTML = `
-      <div class="taskpapr-dialog" role="dialog" aria-modal="true">
-        <p>${message}</p>
-        <div class="taskpapr-dialog-btns">
-          <button class="btn-cancel">Cancel</button>
-          <button class="${danger ? 'btn-danger' : 'btn-ok'}">${okLabel}</button>
-        </div>
-      </div>`;
+    const dialog = document.createElement('div');
+    dialog.className = 'taskpapr-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const p = document.createElement('p');
+    p.textContent = message;
+    const btns = document.createElement('div');
+    btns.className = 'taskpapr-dialog-btns';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-cancel';
+    cancelBtn.textContent = 'Cancel';
+    const okBtn = document.createElement('button');
+    okBtn.className = danger ? 'btn-danger' : 'btn-ok';
+    okBtn.textContent = okLabel;
+    btns.append(cancelBtn, okBtn);
+    dialog.append(p, btns);
+    backdrop.append(dialog);
     document.body.appendChild(backdrop);
-    const [cancelBtn, okBtn] = backdrop.querySelectorAll('button');
     const close = (result) => { backdrop.remove(); resolve(result); };
     cancelBtn.addEventListener('click', () => close(false));
     okBtn.addEventListener('click',     () => close(true));
@@ -2824,18 +2843,27 @@ function paprPrompt(message, defaultValue = '') {
   return new Promise(resolve => {
     const backdrop = document.createElement('div');
     backdrop.className = 'taskpapr-dialog-backdrop';
-    backdrop.innerHTML = `
-      <div class="taskpapr-dialog" role="dialog" aria-modal="true">
-        <p>${message}</p>
-        <input type="text" value="${defaultValue.replace(/"/g, '&quot;')}" />
-        <div class="taskpapr-dialog-btns">
-          <button class="btn-cancel">Cancel</button>
-          <button class="btn-ok">OK</button>
-        </div>
-      </div>`;
+    const dialog = document.createElement('div');
+    dialog.className = 'taskpapr-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const p = document.createElement('p');
+    p.textContent = message;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = defaultValue;
+    const btns = document.createElement('div');
+    btns.className = 'taskpapr-dialog-btns';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-cancel';
+    cancelBtn.textContent = 'Cancel';
+    const okBtn = document.createElement('button');
+    okBtn.className = 'btn-ok';
+    okBtn.textContent = 'OK';
+    btns.append(cancelBtn, okBtn);
+    dialog.append(p, input, btns);
+    backdrop.append(dialog);
     document.body.appendChild(backdrop);
-    const input = backdrop.querySelector('input');
-    const [cancelBtn, okBtn] = backdrop.querySelectorAll('button');
     const close = (result) => { backdrop.remove(); resolve(result); };
     cancelBtn.addEventListener('click', () => close(null));
     okBtn.addEventListener('click',     () => close(input.value));
@@ -2945,9 +2973,11 @@ function renderNotesPreview(text) {
     notesPreview.innerHTML = '';
     return;
   }
-  // marked is loaded from CDN; fall back to plain text if not yet loaded
   if (typeof marked !== 'undefined') {
-    notesPreview.innerHTML = marked.parse(text, { breaks: true });
+    const html = marked.parse(text, { breaks: true });
+    notesPreview.innerHTML = typeof DOMPurify !== 'undefined'
+      ? DOMPurify.sanitize(html)
+      : html;
   } else {
     notesPreview.textContent = text;
   }
@@ -3296,7 +3326,36 @@ async function pollForChanges() {
   }
 }
 
-setInterval(pollForChanges, 60_000);
+// ── Server-Sent Events — real-time change notifications ──────
+// The server pushes `data: change\n\n` after every write. EventSource
+// auto-reconnects on connection loss. A 5-minute fallback poll catches
+// edge cases (proxy buffering, missed events, server restart).
+//
+// Refreshes are coalesced: every write echoes back to the writer too, and
+// multi-step actions (drag + reorder, import) emit several events in quick
+// succession — one deferred refresh covers the burst instead of refetching
+// five endpoints per event.
+let _sseRefreshTimer = null;
+
+(function startSse() {
+  const es = new EventSource('/api/events');
+  es.onmessage = (e) => {
+    if (e.data !== 'change') return;
+    clearTimeout(_sseRefreshTimer);
+    _sseRefreshTimer = setTimeout(pollForChanges, 400);
+  };
+  es.onerror = () => {
+    // On persistent error, close and schedule a manual reconnect.
+    // (EventSource auto-reconnects for transient failures; this handles
+    // cases where the browser gives up after repeated failures.)
+    es.close();
+    setTimeout(startSse, 10_000);
+  };
+})();
+
+// Safety-net poll — handles cases where SSE events are missed
+// (e.g. the server restarted without flushing, a proxy is buffering).
+setInterval(pollForChanges, 5 * 60 * 1000);
 
 // ── Canvas Bookmarks ──────────────────────────────────────────
 // Saved views: store x/y/zoom in DB for cross-device sync.

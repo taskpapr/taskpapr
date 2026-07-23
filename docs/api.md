@@ -8,9 +8,9 @@ All API endpoints require authentication — either a browser session or an API 
 Normal login via GitHub OAuth or OIDC. Session cookie is set automatically.
 
 ### API key (Bearer token)
-Create keys in the Admin UI (`/admin` → API keys section) or via:
+Create keys in Settings (`/settings` → API keys section) or via:
 ```
-POST /api/admin/api-keys   {"name": "my key"}
+POST /api/keys   {"name": "my key"}
 ```
 Use in requests:
 ```
@@ -165,10 +165,10 @@ Body: `{ "email": "user@example.com", "note": "optional note" }`
 #### `DELETE /api/admin/whitelist/:id`
 Remove an entry from the whitelist.
 
-#### `GET /api/admin/api-keys`
+#### `GET /api/keys`
 List all API keys for the current user (never returns raw key values — only prefix, name, dates).
 
-#### `POST /api/admin/api-keys`
+#### `POST /api/keys`
 Create an API key.
 
 Body: `{ "name": "Claude Desktop" }`
@@ -183,7 +183,7 @@ Response (raw key shown **once only**):
 }
 ```
 
-#### `DELETE /api/admin/api-keys/:id`
+#### `DELETE /api/keys/:id`
 Revoke an API key immediately.
 
 ---

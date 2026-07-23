@@ -317,6 +317,16 @@ These are security concerns that exist, but are correctly handled at the infrast
 
 Adding these to the application would increase complexity, increase attack surface (buggy blocklist logic), and provide weaker protection than the proxy layer. Keep Node.js thin.
 
+### Scaling note: SSE is single-replica
+
+Real-time change notifications (`/api/events`) use an **in-process** connection
+registry — a write on replica A does not notify a browser connected to replica B.
+Run a single app replica (the Postgres advisory locks already assume one active
+scheduler). The frontend's 60-second and 5-minute fallback polls mean a missed
+event delays a refresh, never loses data. If multi-replica ever becomes real,
+the upgrade path is Postgres LISTEN/NOTIFY behind the same `emitUserChange()`
+interface.
+
 ---
 
 ## Part 5: Ongoing hygiene

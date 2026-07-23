@@ -39,6 +39,9 @@ async function setTrialEndDate(userId, extraDays = 0) {
 
 // Generate a short unique referral code for a user, e.g. "james-x7k2"
 // Falls back to a random code if display_name is absent or too short.
+// Accepted race: check-then-set isn't atomic, but a collision needs two users
+// with the same name slug AND the same 4-char suffix in the same instant;
+// the userId-based fallback keeps even that from failing hard.
 async function generateReferralCode(userId) {
   const user = await queries.users.byId.get(userId);
   const base = (user?.display_name || user?.email || 'user')
@@ -174,6 +177,60 @@ function isWhitelistRequired() {
 module.exports._isWhitelistRequired = isWhitelistRequired;
 
 // ============================================================
+// Shared OAuth verify core
+// ============================================================
+// One implementation of the whitelist check, user create/update, first-user
+// admin promotion, and new-user setup for all three strategies.
+// Returns { user } on success or { user: null, reason } when login is denied.
+// opts.skipWhitelist: the IdP is the trust boundary (OIDC_TRUST_IDP).
+async function findOrCreateOAuthUser(provider, providerId, profileFields, opts = {}) {
+  const email       = (profileFields.email || '').toLowerCase().trim();
+  const displayName = profileFields.displayName || null;
+  const avatarUrl   = profileFields.avatarUrl   || null;
+
+  const countRow = await queries.users.count.get();
+  // Number(): node-pg returns COUNT(*) as a string (bigint) — without the
+  // coercion, `userCount === 0` is never true and the first user on a
+  // fresh Postgres install would not become admin.
+  const userCount   = Number(countRow.c);
+  const isFirstUser = userCount === 0;
+
+  if (!isFirstUser && !opts.skipWhitelist && isWhitelistRequired()) {
+    if (!email) return { user: null, reason: 'no_email' };
+    const allowed = await queries.whitelist.byEmail.get(email);
+    if (!allowed) return { user: null, reason: 'not_invited' };
+  }
+
+  let user = await queries.users.byProvider.get(provider, providerId);
+
+  if (!user) {
+    const info = await queries.users.insert.run(
+      provider, providerId, email || null, displayName, avatarUrl,
+      isFirstUser ? 1 : 0
+    );
+    user = await queries.users.byId.get(info.id);
+    await seedDefaultTiles(user.id);
+    await generateReferralCode(user.id);
+    await setTrialEndDate(user.id);
+  } else {
+    await queries.users.updateLogin.run(
+      email       || user.email,
+      displayName || user.display_name,
+      avatarUrl   || user.avatar_url,
+      user.id
+    );
+    user = await queries.users.byId.get(user.id);
+  }
+
+  if (isFirstUser && !user.is_admin) {
+    await queries.users.setAdmin.run(user.id);
+    user = await queries.users.byId.get(user.id);
+  }
+
+  return { user };
+}
+
+// ============================================================
 // GitHub strategy
 // ============================================================
 function setupGitHubStrategy() {
@@ -190,46 +247,12 @@ function setupGitHubStrategy() {
     { clientID, clientSecret, callbackURL, scope: ['user:email'] },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        const email = (profile.emails?.[0]?.value || '').toLowerCase().trim();
-
-        // Check whitelist (skip if first user, or if open registration is on)
-        const countRow = await queries.users.count.get();
-        const userCount = countRow.c;
-        if (userCount > 0 && isWhitelistRequired()) {
-          if (!email) return done(null, false, { message: 'no_email' });
-          const allowed = await queries.whitelist.byEmail.get(email);
-          if (!allowed) return done(null, false, { message: 'not_invited' });
-        }
-
-        const isFirstUser = userCount === 0;
-        let user = await queries.users.byProvider.get('github', String(profile.id));
-
-        if (!user) {
-          const info = await queries.users.insert.run(
-            'github', String(profile.id), email || null,
-            profile.displayName || profile.username || null,
-            profile.photos?.[0]?.value || null,
-            isFirstUser ? 1 : 0
-          );
-          user = await queries.users.byId.get(info.id);
-          await seedDefaultTiles(user.id);
-          await generateReferralCode(user.id);
-          await setTrialEndDate(user.id);
-        } else {
-          await queries.users.updateLogin.run(
-            email || user.email,
-            profile.displayName || profile.username || user.display_name,
-            profile.photos?.[0]?.value || user.avatar_url,
-            user.id
-          );
-          user = await queries.users.byId.get(user.id);
-        }
-
-        if (isFirstUser && !user.is_admin) {
-          await queries.users.setAdmin.run(user.id);
-          user = await queries.users.byId.get(user.id);
-        }
-
+        const { user, reason } = await findOrCreateOAuthUser('github', String(profile.id), {
+          email:       profile.emails?.[0]?.value,
+          displayName: profile.displayName || profile.username,
+          avatarUrl:   profile.photos?.[0]?.value,
+        });
+        if (!user) return done(null, false, { message: reason });
         done(null, user);
       } catch (err) {
         done(err);
@@ -256,46 +279,12 @@ function setupGoogleStrategy() {
     { clientID, clientSecret, callbackURL },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        const email = (profile.emails?.[0]?.value || '').toLowerCase().trim();
-
-        // Check whitelist (skip if first user, or if open registration is on)
-        const countRow = await queries.users.count.get();
-        const userCount = countRow.c;
-        if (userCount > 0 && isWhitelistRequired()) {
-          if (!email) return done(null, false, { message: 'no_email' });
-          const allowed = await queries.whitelist.byEmail.get(email);
-          if (!allowed) return done(null, false, { message: 'not_invited' });
-        }
-
-        const isFirstUser = userCount === 0;
-        let user = await queries.users.byProvider.get('google', String(profile.id));
-
-        if (!user) {
-          const info = await queries.users.insert.run(
-            'google', String(profile.id), email || null,
-            profile.displayName || null,
-            profile.photos?.[0]?.value || null,
-            isFirstUser ? 1 : 0
-          );
-          user = await queries.users.byId.get(info.id);
-          await seedDefaultTiles(user.id);
-          await generateReferralCode(user.id);
-          await setTrialEndDate(user.id);
-        } else {
-          await queries.users.updateLogin.run(
-            email || user.email,
-            profile.displayName || user.display_name,
-            profile.photos?.[0]?.value || user.avatar_url,
-            user.id
-          );
-          user = await queries.users.byId.get(user.id);
-        }
-
-        if (isFirstUser && !user.is_admin) {
-          await queries.users.setAdmin.run(user.id);
-          user = await queries.users.byId.get(user.id);
-        }
-
+        const { user, reason } = await findOrCreateOAuthUser('google', String(profile.id), {
+          email:       profile.emails?.[0]?.value,
+          displayName: profile.displayName,
+          avatarUrl:   profile.photos?.[0]?.value,
+        });
+        if (!user) return done(null, false, { message: reason });
         done(null, user);
       } catch (err) {
         done(err);
@@ -371,51 +360,13 @@ async function setupOidcStrategy() {
     },
     async (issuer, profile, done) => {
       try {
-        const email = (
-          profile.emails?.[0]?.value ||
-          profile._json?.email ||
-          ''
-        ).toLowerCase().trim();
-
-        const countRow = await queries.users.count.get();
-        const userCount = countRow.c;
-        const isFirstUser = userCount === 0;
-
-        if (!isFirstUser && !trustIdp && isWhitelistRequired()) {
-          if (!email) return done(null, false, { message: 'no_email' });
-          const allowed = await queries.whitelist.byEmail.get(email);
-          if (!allowed) return done(null, false, { message: 'not_invited' });
-        }
-
         const providerId = profile.id || profile._json?.sub || String(profile.id);
-        let user = await queries.users.byProvider.get('oidc', providerId);
-
-        if (!user) {
-          const info = await queries.users.insert.run(
-            'oidc', providerId, email || null,
-            profile.displayName || profile._json?.name || null,
-            profile._json?.picture || null,
-            isFirstUser ? 1 : 0
-          );
-          user = await queries.users.byId.get(info.id);
-          await seedDefaultTiles(user.id);
-          await generateReferralCode(user.id);
-          await setTrialEndDate(user.id);
-        } else {
-          await queries.users.updateLogin.run(
-            email || user.email,
-            profile.displayName || profile._json?.name || user.display_name,
-            profile._json?.picture || user.avatar_url,
-            user.id
-          );
-          user = await queries.users.byId.get(user.id);
-        }
-
-        if (isFirstUser && !user.is_admin) {
-          await queries.users.setAdmin.run(user.id);
-          user = await queries.users.byId.get(user.id);
-        }
-
+        const { user, reason } = await findOrCreateOAuthUser('oidc', providerId, {
+          email:       profile.emails?.[0]?.value || profile._json?.email,
+          displayName: profile.displayName || profile._json?.name,
+          avatarUrl:   profile._json?.picture,
+        }, { skipWhitelist: trustIdp });
+        if (!user) return done(null, false, { message: reason });
         done(null, user);
       } catch (err) {
         done(err);
@@ -467,6 +418,10 @@ async function setupAuth(app) {
   setupGoogleStrategy();
   await setupOidcStrategy();
 
+  if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
+    throw new Error('SESSION_SECRET must be set in production — refusing to start with default secret');
+  }
+
   app.use(session({
     store:             new SQLiteStore({ ttl: 30 * 24 * 60 * 60 }), // 30 days
     secret:            process.env.SESSION_SECRET || 'dev-secret-change-me-in-production',
@@ -515,12 +470,17 @@ function setupAuthRoutes(app, getMeExtra) {
     app.get('/auth/google/callback',
       authRateLimit,
       passport.authenticate('google', { failureRedirect: '/login?error=not_invited' }),
-      async (req, res) => {
-        if (req.session?.pending_ref && req.user) {
-          await applyReferral(req.user.id, req.session.pending_ref).catch(() => {});
-          delete req.session.pending_ref;
-        }
-        res.redirect('/');
+      (req, res) => {
+        if (!req.user) return res.redirect('/login?error=failed');
+        const pendingRef = req.session?.pending_ref;
+        req.session.regenerate(regenerateErr => {
+          if (regenerateErr) return res.redirect('/login?error=failed');
+          req.login(req.user, loginErr => {
+            if (loginErr) return res.redirect('/login?error=failed');
+            if (pendingRef) applyReferral(req.user.id, pendingRef).catch(() => {});
+            res.redirect('/');
+          });
+        });
       }
     );
   }
@@ -534,12 +494,17 @@ function setupAuthRoutes(app, getMeExtra) {
     app.get('/auth/github/callback',
       authRateLimit,
       passport.authenticate('github', { failureRedirect: '/login?error=not_invited' }),
-      async (req, res) => {
-        if (req.session?.pending_ref && req.user) {
-          await applyReferral(req.user.id, req.session.pending_ref).catch(() => {});
-          delete req.session.pending_ref;
-        }
-        res.redirect('/');
+      (req, res) => {
+        if (!req.user) return res.redirect('/login?error=failed');
+        const pendingRef = req.session?.pending_ref;
+        req.session.regenerate(regenerateErr => {
+          if (regenerateErr) return res.redirect('/login?error=failed');
+          req.login(req.user, loginErr => {
+            if (loginErr) return res.redirect('/login?error=failed');
+            if (pendingRef) applyReferral(req.user.id, pendingRef).catch(() => {});
+            res.redirect('/');
+          });
+        });
       }
     );
   }
@@ -569,12 +534,17 @@ function setupAuthRoutes(app, getMeExtra) {
       if (!_oidcRegistered) {
         return res.status(503).send('SSO temporarily unavailable.');
       }
-      authRateLimit(req, res, () => passport.authenticate('oidc', { failureRedirect: '/login?error=not_invited' })(req, res, async () => {
-        if (req.session?.pending_ref && req.user) {
-          await applyReferral(req.user.id, req.session.pending_ref).catch(() => {});
-          delete req.session.pending_ref;
-        }
-        res.redirect('/');
+      authRateLimit(req, res, () => passport.authenticate('oidc', { failureRedirect: '/login?error=not_invited' })(req, res, () => {
+        if (!req.user) return res.redirect('/login?error=failed');
+        const pendingRef = req.session?.pending_ref;
+        req.session.regenerate(regenerateErr => {
+          if (regenerateErr) return res.redirect('/login?error=failed');
+          req.login(req.user, loginErr => {
+            if (loginErr) return res.redirect('/login?error=failed');
+            if (pendingRef) applyReferral(req.user.id, pendingRef).catch(() => {});
+            res.redirect('/');
+          });
+        });
       }));
     });
   }
