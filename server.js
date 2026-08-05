@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 require('express-async-errors');
 
 const express = require('express');
@@ -82,7 +82,14 @@ app.use(helmet({
 app.use(rateLimitGlobal);
 
 // ── Body parser ───────────────────────────────────────────────
-app.use(express.json({ limit: '200kb' }));
+// Skip the Stripe webhook path — it verifies the signature against the raw
+// request body (see routes/billing.js), which requires the bytes to reach
+// its own express.raw() middleware untouched. Parsing JSON globally first
+// would consume the stream and break signature verification on every call.
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/stripe/webhook') return next();
+  express.json({ limit: '200kb' })(req, res, next);
+});
 
 // ── Postgres debug date — 30-second cached middleware ────────
 app.use(createDebugDateMiddleware());
@@ -126,16 +133,6 @@ app.get('/pricing', (req, res) => {
 });
 app.get('/pricing/success',  (_req, res) => res.sendFile(path.join(__dirname, 'public', 'pricing-success.html')));
 app.get('/pricing/canceled', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'pricing-canceled.html')));
-
-// Pricing config (never in source — lives in pricing.json, gitignored)
-app.get('/api/pricing', (_req, res) => {
-  let config = { currency_symbol: '', monthly: 0, annual: 0, annual_monthly_equivalent: 0, trial_days: 14 };
-  try {
-    const raw = require('fs').readFileSync(path.join(__dirname, 'pricing.json'), 'utf8');
-    config = { ...config, ...JSON.parse(raw) };
-  } catch (_) { /* absent or unreadable — return zeros */ }
-  res.json(config);
-});
 
 // Auth providers endpoint — consumed by login.html to show/hide OAuth buttons
 app.get('/api/auth-providers', (_req, res) => {

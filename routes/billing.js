@@ -25,6 +25,48 @@ async function updateSub(userId, fields) {
   await queryRun(`UPDATE users SET ${setClauses} WHERE id = ?`, values);
 }
 
+// ── Pricing display ────────────────────────────────────────────
+// Amounts are fetched live from Stripe rather than duplicated in a config
+// file — the price shown on /pricing always matches what's actually charged.
+// Cached briefly so the pricing page doesn't hit the Stripe API on every load.
+let pricingCache   = null;
+let pricingCacheAt = 0;
+const PRICING_CACHE_MS = 5 * 60 * 1000;
+const CURRENCY_SYMBOLS = { gbp: '£', usd: '$', eur: '€' };
+
+async function getPricingConfig() {
+  const empty = { currency_symbol: '', monthly: 0, annual: 0, annual_monthly_equivalent: 0, trial_days: 14 };
+
+  const monthlyId = process.env.STRIPE_SOLO_MONTHLY_PRICE_ID;
+  const annualId  = process.env.STRIPE_SOLO_ANNUAL_PRICE_ID;
+  if (!stripe || !monthlyId || !annualId) return empty;
+
+  if (pricingCache && (Date.now() - pricingCacheAt) < PRICING_CACHE_MS) {
+    return pricingCache;
+  }
+
+  try {
+    const [monthlyPrice, annualPrice] = await Promise.all([
+      stripe.prices.retrieve(monthlyId),
+      stripe.prices.retrieve(annualId),
+    ]);
+    const monthly = monthlyPrice.unit_amount / 100;
+    const annual  = annualPrice.unit_amount / 100;
+    pricingCache = {
+      currency_symbol: CURRENCY_SYMBOLS[monthlyPrice.currency] || '',
+      monthly,
+      annual,
+      annual_monthly_equivalent: Math.round((annual / 12) * 100) / 100,
+      trial_days: 14,
+    };
+    pricingCacheAt = Date.now();
+    return pricingCache;
+  } catch (err) {
+    console.error('[pricing] failed to fetch prices from Stripe:', err.message);
+    return pricingCache || empty; // serve stale data over a broken page if we have any
+  }
+}
+
 // ── Stripe event processor ────────────────────────────────────
 
 async function handleStripeEvent(event) {
@@ -148,6 +190,11 @@ async function handleStripeEvent(event) {
 // ── Public routes (before requireAuth) ───────────────────────
 
 function registerPublic(app) {
+  // GET /api/pricing — display config for the pricing page, sourced from Stripe
+  app.get('/api/pricing', async (_req, res) => {
+    res.json(await getPricingConfig());
+  });
+
   // POST /api/stripe/webhook — Stripe requires the raw request body to verify
   // the signature. Mounted before the JSON body-parser runs on this route.
   app.post('/api/stripe/webhook',

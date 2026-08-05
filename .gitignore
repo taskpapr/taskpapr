@@ -19,7 +19,6 @@ docker-compose.yml
 
 # Configuration
 .env
-pricing.json
 
 # Private data 
 private_data/**

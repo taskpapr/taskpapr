@@ -60,7 +60,7 @@
     pricing = p;
     updateToggle();
   }).catch(() => {
-    // Server unreachable or pricing.json absent — render dashes, don't crash
+    // Server unreachable or Stripe not configured — render dashes, don't crash
     updateToggle();
   });
 
