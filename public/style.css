@@ -153,6 +153,13 @@ body {
 }
 .user-dropdown a:hover, .user-dropdown button:hover { background: var(--border); }
 .user-dropdown a.hidden { display: none; }
+#trial-countdown {
+  padding: 7px 14px; font-size: 13px; font-family: inherit;
+  color: var(--ink);
+}
+/* Override the block/full-width menu-item rule above — this is an inline
+   link within the trial-countdown text, not its own menu row. */
+#trial-countdown a { display: inline; width: auto; padding: 0; }
 
 /* ── Bookmarks dropdown ────────────────────────── */
 .bookmark-menu { position: relative; }

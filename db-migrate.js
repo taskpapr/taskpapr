@@ -15,7 +15,7 @@
 
 'use strict';
 
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 if (!process.env.DATABASE_URL) {
   console.error('[migrate] DATABASE_URL is not set — this script is for PostgreSQL only.');

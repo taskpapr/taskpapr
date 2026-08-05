@@ -33,6 +33,7 @@ All providers are enabled or disabled solely by the presence of the relevant env
     - [4d. Add to .env](#4d-add-to-env)
   - [5. Running multiple providers simultaneously](#5-running-multiple-providers-simultaneously)
   - [6. Whitelist vs. trust-your-IdP](#6-whitelist-vs-trust-your-idp)
+    - [6a. Whitelist for GitHub / Google — open registration for hosted SaaS](#6a-whitelist-for-github--google--open-registration-for-hosted-saas)
   - [7. First-user / admin bootstrap](#7-first-user--admin-bootstrap)
   - [8. Full .env reference](#8-full-env-reference)
 
@@ -228,7 +229,22 @@ The `OIDC_TRUST_IDP` setting modifies this behaviour for OIDC logins only:
 
 **Recommendation:** Set `OIDC_TRUST_IDP=true` when using Authentik. Authentik is your own IdP and you already control who has accounts there. It's redundant to maintain a second whitelist in taskpapr.
 
-For **Google OAuth**, the whitelist still applies (unless you're on a hosted SaaS deployment with open registration). This is intentional — unlike your own Authentik instance, Google accounts are not a closed universe you control.
+`OIDC_TRUST_IDP` only affects the OIDC strategy. It has **no effect on GitHub or Google logins** — those are gated by a separate, independent switch (below).
+
+### 6a. Whitelist for GitHub / Google — open registration for hosted SaaS
+
+GitHub and Google logins are governed by `isWhitelistRequired()` in `auth.js`, not `OIDC_TRUST_IDP`:
+
+| Condition | Whitelist |
+|---|---|
+| `REQUIRE_WHITELIST=false` (explicit) | OFF — anyone can register |
+| `REQUIRE_WHITELIST=true` (explicit) | ON — always enforced, even with Stripe configured |
+| `STRIPE_SECRET_KEY` set, `REQUIRE_WHITELIST` unset | OFF — treated as a hosted SaaS instance with open registration |
+| Neither set | ON (default) — self-hosted, invite-only |
+
+In other words: **the whitelist auto-disables the moment you configure Stripe billing.** That's the intended flow for running taskpapr as a public service — new users sign in with GitHub/Google, land as non-admin free-tier accounts, and upgrade via Stripe checkout. No admin action or whitelist entry is needed per user.
+
+If you want open registration *before* Stripe is wired up, set `REQUIRE_WHITELIST=false` explicitly as an interim step.
 
 ---
 
