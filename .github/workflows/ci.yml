@@ -58,6 +58,9 @@ jobs:
       - name: Run bookmarks migration test
         run: node test/migration-bookmarks.js
 
+      - name: Run checkout customer-params test
+        run: node test/checkout-customer-params.js
+
       - name: Run API integration tests
         run: bash test/integration-api.sh http://localhost:3033
 
