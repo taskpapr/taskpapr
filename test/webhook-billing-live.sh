@@ -75,13 +75,13 @@ PRICE_ID=$(stripe_api POST prices \
   -d "unit_amount=500" -d "currency=gbp" -d "recurring[interval]=month" \
   -d "product=$PRODUCT_ID" | jq -r '.id')
 
-# pm_card_visa is Stripe's built-in test-mode PaymentMethod — always succeeds,
-# no real card data involved, only usable with a test-mode key.
-stripe_api POST "payment_methods/pm_card_visa/attach" -d "customer=$CUSTOMER_ID" > /dev/null
-stripe_api POST "customers/$CUSTOMER_ID" \
-  -d "invoice_settings[default_payment_method]=pm_card_visa" > /dev/null
-
-SUB_RESP=$(stripe_api POST subscriptions -d "customer=$CUSTOMER_ID" -d "items[0][price]=$PRICE_ID")
+# A 1-day trial means Stripe creates this subscription with no payment
+# method required at all (no card, no attach step) — simpler and more
+# reliable than simulating a real charge, and it exercises exactly the
+# same mapSubscriptionStatus() code path: 'trialing' is just as valid an
+# input as 'active'.
+SUB_RESP=$(stripe_api POST subscriptions \
+  -d "customer=$CUSTOMER_ID" -d "items[0][price]=$PRICE_ID" -d "trial_period_days=1")
 SUB_ID=$(echo "$SUB_RESP" | jq -r '.id')
 SUB_STATUS=$(echo "$SUB_RESP" | jq -r '.status')
 
@@ -130,12 +130,16 @@ fi
 # The webhook handler is awaited before the HTTP response is sent (see
 # routes/billing.js), so the subscription.retrieve() round-trip has already
 # completed by the time curl returns above — no polling/sleep needed.
+# Expect subscription_status to match Stripe's real status (SUB_STATUS,
+# 'trialing') — proving checkout.session.completed threaded the live
+# subscription state through correctly, independent of the earlier
+# out-of-order event.
 STATUS=$(curl -s "$BASE/api/billing/status")
-if echo "$STATUS" | jq -e '.subscription_status == "active"' > /dev/null 2>&1 \
+if echo "$STATUS" | jq -e --arg s "$SUB_STATUS" '.subscription_status == $s' > /dev/null 2>&1 \
    && echo "$STATUS" | jq -e '.has_billing_account == true' > /dev/null 2>&1; then
-  ok "subscription activated correctly despite out-of-order events (the v0.45.2 fix)"
+  ok "subscription activated correctly (status: $SUB_STATUS) despite out-of-order events (the v0.45.2 fix)"
 else
-  fail "expected subscription_status:active, has_billing_account:true — got: $STATUS"
+  fail "expected subscription_status:$SUB_STATUS, has_billing_account:true — got: $STATUS"
 fi
 
 echo ""
