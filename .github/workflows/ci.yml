@@ -12,6 +12,16 @@ jobs:
     name: Smoke test
     runs-on: ubuntu-latest
 
+    # Dummy Stripe credentials — no real Stripe account involved. Without
+    # these, server.js boots with stripe = null and /api/stripe/webhook
+    # short-circuits before ever verifying a signature, which is exactly
+    # how the v0.45.1 body-parser-ordering bug shipped undetected: the
+    # code path that broke was structurally untested. constructEvent()
+    # is pure local HMAC verification, so a dummy secret is sufficient.
+    env:
+      STRIPE_SECRET_KEY: sk_test_dummy_for_ci
+      STRIPE_WEBHOOK_SECRET: whsec_test_dummy_for_ci
+
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +57,9 @@ jobs:
       - name: Run API integration tests
         run: bash test/integration-api.sh http://localhost:3033
 
+      - name: Run Stripe webhook signature test
+        run: bash test/webhook-billing.sh http://localhost:3033
+
       - name: npm audit (high/critical fail CI)
         run: npm audit --audit-level=high
 
@@ -75,6 +88,9 @@ jobs:
 
     env:
       DATABASE_URL: postgres://taskpapr:taskpapr@localhost:5432/taskpapr
+      # Dummy Stripe credentials — see smoke-test job above for why.
+      STRIPE_SECRET_KEY: sk_test_dummy_for_ci
+      STRIPE_WEBHOOK_SECRET: whsec_test_dummy_for_ci
 
     steps:
       - uses: actions/checkout@v4
@@ -110,6 +126,9 @@ jobs:
 
       - name: Run API integration tests
         run: bash test/integration-api.sh http://localhost:3033
+
+      - name: Run Stripe webhook signature test
+        run: bash test/webhook-billing.sh http://localhost:3033
 
       - name: Stop server
         if: always()
