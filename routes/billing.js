@@ -69,6 +69,13 @@ async function getPricingConfig() {
 
 // ── Stripe event processor ────────────────────────────────────
 
+// Maps a Stripe subscription status to taskpapr's internal status.
+function mapSubscriptionStatus(status) {
+  if (['active', 'trialing'].includes(status)) return status;
+  if (status === 'past_due') return 'past_due';
+  return 'canceled';
+}
+
 async function handleStripeEvent(event) {
   const obj = event.data.object;
 
@@ -78,11 +85,7 @@ async function handleStripeEvent(event) {
     case 'customer.subscription.created':
     case 'customer.subscription.updated': {
       const customerId = obj.customer;
-      const status     = obj.status; // trialing | active | past_due | canceled | unpaid
-      // Map Stripe status to our internal status
-      const ourStatus = ['active', 'trialing'].includes(status) ? status
-                      : status === 'past_due' ? 'past_due'
-                      : 'canceled';
+      const ourStatus  = mapSubscriptionStatus(obj.status);
       // Determine tier from price metadata or product name — default 'solo'
       const tier = 'solo'; // v0.39+ will read from price metadata
 
@@ -178,6 +181,22 @@ async function handleStripeEvent(event) {
       // Store the Stripe customer ID against this user
       await queryRun('UPDATE users SET stripe_customer_id = ? WHERE id = ?', [customerId, userId]);
       console.log(`[stripe/webhook] linked customer ${customerId} to user ${userId}`);
+
+      // Also set subscription status directly from the session rather than
+      // relying solely on customer.subscription.created arriving afterward —
+      // Stripe does not guarantee webhook delivery order, and a subscription
+      // event arriving before this one would silently no-op (no linked
+      // customer yet to match against).
+      if (stripe && obj.subscription) {
+        try {
+          const subscription = await stripe.subscriptions.retrieve(obj.subscription);
+          const ourStatus = mapSubscriptionStatus(subscription.status);
+          await updateSub(userId, { subscription_status: ourStatus, subscription_tier: 'solo' });
+          console.log(`[stripe/webhook] user ${userId} subscription → ${ourStatus} (solo) [via checkout]`);
+        } catch (err) {
+          console.error('[stripe/webhook] failed to retrieve subscription after checkout:', err.message);
+        }
+      }
       break;
     }
 
