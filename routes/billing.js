@@ -18,6 +18,15 @@ const stripe = process.env.STRIPE_SECRET_KEY
 const userByCustomer = (customerId) =>
   queryOne('SELECT * FROM users WHERE stripe_customer_id = ?', [customerId]);
 
+// Stripe rejects `customer` and `customer_email` together. Reuse the
+// existing customer if linked (it already has an email on file);
+// otherwise pre-fill from the user's profile for a fresh customer.
+function buildCheckoutCustomerParams(user) {
+  if (user.stripe_customer_id) return { customer: user.stripe_customer_id };
+  if (user.email) return { customer_email: user.email };
+  return {};
+}
+
 // Update subscription fields on a user
 async function updateSub(userId, fields) {
   const setClauses = Object.keys(fields).map(k => `${k} = ?`).join(', ');
@@ -279,7 +288,6 @@ function registerAuth(app) {
     const user   = req.user;
 
     try {
-      // Reuse existing Stripe customer if we have one; otherwise Stripe creates one at checkout
       const checkoutParams = {
         mode:                 'subscription',
         line_items:           [{ price: priceId, quantity: 1 }],
@@ -287,10 +295,7 @@ function registerAuth(app) {
         cancel_url:           `${appUrl}/pricing/canceled`,
         client_reference_id:  String(user.id), // used in checkout.session.completed event
         allow_promotion_codes: true,
-        // Pre-fill email from the user's profile
-        ...(user.email ? { customer_email: user.email } : {}),
-        // Reuse existing customer if linked
-        ...(user.stripe_customer_id ? { customer: user.stripe_customer_id } : {}),
+        ...buildCheckoutCustomerParams(user),
         // Stripe Tax — calculates UK VAT + EU digital services tax automatically
         automatic_tax: { enabled: !!process.env.STRIPE_TAX_ENABLED },
       };
@@ -389,4 +394,4 @@ function registerAuth(app) {
   });
 }
 
-module.exports = { registerPublic, registerAuth };
+module.exports = { registerPublic, registerAuth, buildCheckoutCustomerParams };
