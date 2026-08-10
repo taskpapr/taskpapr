@@ -12,6 +12,20 @@ jobs:
     name: Smoke test
     runs-on: ubuntu-latest
 
+    # Stripe credentials. STRIPE_TEST_SECRET_KEY is a dedicated Stripe TEST
+    # MODE key (repo secret) used for the live webhook integration test below
+    # — it's empty for external contributor PRs (forks don't get secrets), so
+    # STRIPE_SECRET_KEY falls back to a dummy value. Either way the server
+    # boots with stripe != null, which matters: without ANY key, server.js
+    # boots with stripe = null and /api/stripe/webhook short-circuits before
+    # ever verifying a signature — exactly how the v0.45.1 body-parser-
+    # ordering bug shipped undetected, since that code path was structurally
+    # untested. constructEvent() itself is pure local HMAC verification, so
+    # the dummy fallback is sufficient for the signature-only test.
+    env:
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY || 'sk_test_dummy_for_ci' }}
+      STRIPE_WEBHOOK_SECRET: whsec_test_dummy_for_ci
+
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +61,14 @@ jobs:
       - name: Run API integration tests
         run: bash test/integration-api.sh http://localhost:3033
 
+      - name: Run Stripe webhook signature test
+        run: bash test/webhook-billing.sh http://localhost:3033
+
+      - name: Run Stripe webhook live integration test
+        env:
+          STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+        run: bash test/webhook-billing-live.sh http://localhost:3033
+
       - name: npm audit (high/critical fail CI)
         run: npm audit --audit-level=high
 
@@ -75,6 +97,9 @@ jobs:
 
     env:
       DATABASE_URL: postgres://taskpapr:taskpapr@localhost:5432/taskpapr
+      # Dummy Stripe credentials — see smoke-test job above for why.
+      STRIPE_SECRET_KEY: sk_test_dummy_for_ci
+      STRIPE_WEBHOOK_SECRET: whsec_test_dummy_for_ci
 
     steps:
       - uses: actions/checkout@v4
@@ -110,6 +135,9 @@ jobs:
 
       - name: Run API integration tests
         run: bash test/integration-api.sh http://localhost:3033
+
+      - name: Run Stripe webhook signature test
+        run: bash test/webhook-billing.sh http://localhost:3033
 
       - name: Stop server
         if: always()
