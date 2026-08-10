@@ -174,8 +174,6 @@ function isWhitelistRequired() {
   return true; // default: whitelist on
 }
 
-module.exports._isWhitelistRequired = isWhitelistRequired;
-
 // ============================================================
 // Shared OAuth verify core
 // ============================================================
@@ -622,4 +620,4 @@ function apiKeyAuth(req, res, next) {
   }).catch(() => next());
 }
 
-module.exports = { setupAuth, setupAuthRoutes, requireAuth, requireAdmin, generateApiKey, apiKeyAuth, isSingleUserMode, generateReferralCode, applyReferral, _isGoogleRegistered: () => _googleRegistered };
+module.exports = { setupAuth, setupAuthRoutes, requireAuth, requireAdmin, generateApiKey, apiKeyAuth, isSingleUserMode, generateReferralCode, applyReferral, _isWhitelistRequired: isWhitelistRequired, _isGoogleRegistered: () => _googleRegistered };
