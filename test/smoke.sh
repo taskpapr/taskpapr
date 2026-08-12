@@ -79,6 +79,13 @@ ME=$(body "$BASE/api/me")
 assert_field "GET /api/me returns version" ".version" "$ME"
 assert_field "GET /api/me returns single_user flag" ".single_user" "$ME"
 
+# Admin routes (single-user mode auto-authenticates as admin — no separate
+# login needed). Was completely uncovered until a stale double module.exports
+# assignment in auth.js silently dropped _isWhitelistRequired, 500-ing this
+# route in production for months before anyone hit it manually.
+REG_STATUS=$(body "$BASE/api/admin/registration-status")
+assert_field "GET /api/admin/registration-status" ".open_registration" "$REG_STATUS"
+
 # Create an API key for webhook tests
 KEY_RESP=$(body -X POST "$BASE/api/keys" \
   -H "Content-Type: application/json" \

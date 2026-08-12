@@ -18,6 +18,15 @@ const stripe = process.env.STRIPE_SECRET_KEY
 const userByCustomer = (customerId) =>
   queryOne('SELECT * FROM users WHERE stripe_customer_id = ?', [customerId]);
 
+// Stripe rejects `customer` and `customer_email` together. Reuse the
+// existing customer if linked (it already has an email on file);
+// otherwise pre-fill from the user's profile for a fresh customer.
+function buildCheckoutCustomerParams(user) {
+  if (user.stripe_customer_id) return { customer: user.stripe_customer_id };
+  if (user.email) return { customer_email: user.email };
+  return {};
+}
+
 // Update subscription fields on a user
 async function updateSub(userId, fields) {
   const setClauses = Object.keys(fields).map(k => `${k} = ?`).join(', ');
@@ -69,6 +78,13 @@ async function getPricingConfig() {
 
 // ── Stripe event processor ────────────────────────────────────
 
+// Maps a Stripe subscription status to taskpapr's internal status.
+function mapSubscriptionStatus(status) {
+  if (['active', 'trialing'].includes(status)) return status;
+  if (status === 'past_due') return 'past_due';
+  return 'canceled';
+}
+
 async function handleStripeEvent(event) {
   const obj = event.data.object;
 
@@ -78,11 +94,7 @@ async function handleStripeEvent(event) {
     case 'customer.subscription.created':
     case 'customer.subscription.updated': {
       const customerId = obj.customer;
-      const status     = obj.status; // trialing | active | past_due | canceled | unpaid
-      // Map Stripe status to our internal status
-      const ourStatus = ['active', 'trialing'].includes(status) ? status
-                      : status === 'past_due' ? 'past_due'
-                      : 'canceled';
+      const ourStatus  = mapSubscriptionStatus(obj.status);
       // Determine tier from price metadata or product name — default 'solo'
       const tier = 'solo'; // v0.39+ will read from price metadata
 
@@ -178,6 +190,22 @@ async function handleStripeEvent(event) {
       // Store the Stripe customer ID against this user
       await queryRun('UPDATE users SET stripe_customer_id = ? WHERE id = ?', [customerId, userId]);
       console.log(`[stripe/webhook] linked customer ${customerId} to user ${userId}`);
+
+      // Also set subscription status directly from the session rather than
+      // relying solely on customer.subscription.created arriving afterward —
+      // Stripe does not guarantee webhook delivery order, and a subscription
+      // event arriving before this one would silently no-op (no linked
+      // customer yet to match against).
+      if (stripe && obj.subscription) {
+        try {
+          const subscription = await stripe.subscriptions.retrieve(obj.subscription);
+          const ourStatus = mapSubscriptionStatus(subscription.status);
+          await updateSub(userId, { subscription_status: ourStatus, subscription_tier: 'solo' });
+          console.log(`[stripe/webhook] user ${userId} subscription → ${ourStatus} (solo) [via checkout]`);
+        } catch (err) {
+          console.error('[stripe/webhook] failed to retrieve subscription after checkout:', err.message);
+        }
+      }
       break;
     }
 
@@ -260,7 +288,6 @@ function registerAuth(app) {
     const user   = req.user;
 
     try {
-      // Reuse existing Stripe customer if we have one; otherwise Stripe creates one at checkout
       const checkoutParams = {
         mode:                 'subscription',
         line_items:           [{ price: priceId, quantity: 1 }],
@@ -268,10 +295,7 @@ function registerAuth(app) {
         cancel_url:           `${appUrl}/pricing/canceled`,
         client_reference_id:  String(user.id), // used in checkout.session.completed event
         allow_promotion_codes: true,
-        // Pre-fill email from the user's profile
-        ...(user.email ? { customer_email: user.email } : {}),
-        // Reuse existing customer if linked
-        ...(user.stripe_customer_id ? { customer: user.stripe_customer_id } : {}),
+        ...buildCheckoutCustomerParams(user),
         // Stripe Tax — calculates UK VAT + EU digital services tax automatically
         automatic_tax: { enabled: !!process.env.STRIPE_TAX_ENABLED },
       };
@@ -370,4 +394,4 @@ function registerAuth(app) {
   });
 }
 
-module.exports = { registerPublic, registerAuth };
+module.exports = { registerPublic, registerAuth, buildCheckoutCustomerParams };
