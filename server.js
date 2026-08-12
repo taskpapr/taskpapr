@@ -126,6 +126,10 @@ app.get('/favicon.svg', (_req, res) => res.sendFile(path.join(__dirname, 'public
 // theirs while logged out. Nothing under /js is secret (the repo is public).
 app.use('/js', express.static(path.join(__dirname, 'public', 'js')));
 
+// Brand icons — same reasoning as /js: /login and /pricing reference
+// /icons/mark.svg while logged out. Nothing under /icons is secret.
+app.use('/icons', express.static(path.join(__dirname, 'public', 'icons')));
+
 // Pricing pages — expired-trial users must reach /pricing
 app.get('/pricing', (req, res) => {
   if (req.query.ref && req.session) req.session.pending_ref = req.query.ref;

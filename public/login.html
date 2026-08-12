@@ -4,6 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>taskpapr — sign in</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -29,6 +30,10 @@
       letter-spacing: -0.5px;
       color: #1a1a1a;
       margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
     }
     .tagline { font-size: 13px; color: #888; margin-bottom: 28px; }
     .error {
@@ -71,7 +76,7 @@
 </head>
 <body>
   <div class="card">
-    <h1>taskpapr</h1>
+    <h1><img src="/icons/mark.svg" alt="" width="22" height="22" /> taskpapr</h1>
     <p class="tagline">A minimal task board for the frictionless mind.</p>
 
     <div id="error-not-invited" class="error" hidden>Your account isn't on the invite list. Contact the admin.</div>
