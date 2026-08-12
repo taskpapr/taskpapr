@@ -3545,7 +3545,7 @@ function toggleTodayTile() {
 
   // No tasks flagged — show toast instead of opening an empty tile
   if (flagged === 0) {
-    showToast('No tasks flagged for today — right-click any task to add it.');
+    showToast('No tasks flagged for today — click a task\'s right edge to add it.');
     return;
   }
 
