@@ -26,6 +26,7 @@
       font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
       font-size: 18px; font-weight: 600; letter-spacing: -0.5px;
       text-decoration: none; color: #1a1a1a;
+      display: flex; align-items: center; gap: 7px;
     }
     .nav-links { display: flex; gap: 12px; align-items: center; }
     .btn-nav {
@@ -181,7 +182,7 @@
 <body>
 
 <nav>
-  <a href="/" class="nav-logo">taskpapr</a>
+  <a href="/" class="nav-logo"><img src="/icons/mark.svg" alt="" width="18" height="18" /> taskpapr</a>
   <div class="nav-links">
     <a href="/" class="btn-nav" id="nav-board-btn" style="display:none">← Board</a>
     <a href="/login" class="btn-nav btn-nav-primary" id="nav-signin-btn">Sign in</a>
