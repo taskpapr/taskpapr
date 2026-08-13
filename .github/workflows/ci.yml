@@ -209,11 +209,13 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history/tags, not the default shallow clone
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -240,3 +242,18 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/taskpapr:${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Tag release
+        # Runs after the image is actually published — don't tag a version
+        # that failed to build/push. Idempotent: if this same version's tag
+        # already exists (e.g. a re-run), skip rather than fail the job.
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists, skipping."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
