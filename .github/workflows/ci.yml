@@ -4,10 +4,45 @@ on:
   push:
     branches: ["main"]
   # No branch filter: stacked PRs (feature → feature) must run CI too,
-  # not just PRs targeting main.
+  # not just PRs targeting main. Explicit types add labeled/unlabeled to the
+  # opened/synchronize/reopened default, so adding the version-bump-check's
+  # 'no-version-bump' exemption label after opening a PR actually re-runs
+  # the check instead of leaving a stale failure sitting there.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
+  version-bump-check:
+    name: Version bump check
+    runs-on: ubuntu-latest
+    # Only PRs actually landing on staging/main — not every feature->feature
+    # stacked PR in between, which may legitimately not have bumped yet.
+    if: >
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.base.ref == 'staging' || github.event.pull_request.base.ref == 'main')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
+
+      - name: Compare package.json version against base branch
+        env:
+          HAS_SKIP_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'no-version-bump') }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "$HAS_SKIP_LABEL" = "true" ]; then
+            echo "Skipped — 'no-version-bump' label present."
+            exit 0
+          fi
+          BASE_VERSION=$(git show "origin/$BASE_REF:package.json" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).version))")
+          HEAD_VERSION=$(node -p "require('./package.json').version")
+          if [ "$BASE_VERSION" = "$HEAD_VERSION" ]; then
+            echo "::error::package.json version ($HEAD_VERSION) is unchanged from '$BASE_REF'. Every PR into staging/main should bump the patch version — run 'npm version patch --no-git-tag-version' and commit it. If this PR genuinely doesn't warrant one (docs-only, CI-only, test-only changes), add the 'no-version-bump' label to skip this check."
+            exit 1
+          fi
+          echo "Version bumped: $BASE_VERSION -> $HEAD_VERSION"
+
   smoke-test:
     name: Smoke test
     runs-on: ubuntu-latest
@@ -174,11 +209,13 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history/tags, not the default shallow clone
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -205,3 +242,18 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/taskpapr:${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Tag release
+        # Runs after the image is actually published — don't tag a version
+        # that failed to build/push. Idempotent: if this same version's tag
+        # already exists (e.g. a re-run), skip rather than fail the job.
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists, skipping."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
