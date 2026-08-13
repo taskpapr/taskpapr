@@ -182,11 +182,19 @@ module.exports = function register(app) {
             // Extended fields — absent in v1 files, so every field falls back
             // to the schema default the insert already produced
             const vd = parseInt(t.visibility_days);
+            // created_at: v2 exports include it so export→import round-trips
+            // preserve task age (it feeds rot/urgency rendering). Only accept
+            // a value that parses to a valid date; otherwise fall back to the
+            // insert's own datetime('now') default (v1 files, or malformed input).
+            const createdAt = (typeof t.created_at === 'string' && t.created_at && !isNaN(Date.parse(t.created_at)))
+              ? t.created_at
+              : null;
             await queryRun(
               `UPDATE tasks SET
                  notes = ?, next_due = ?, recurrence = ?, color = ?,
                  visibility_days = ?, no_rot = ?, rot_interval = ?,
-                 today_flag = ?, snooze_until = ?, last_acknowledged_at = ?
+                 today_flag = ?, snooze_until = ?, last_acknowledged_at = ?,
+                 created_at = COALESCE(?, created_at)
                WHERE id = ? AND user_id = ?`,
               [
                 (typeof t.notes      === 'string' && t.notes)      ? t.notes      : null,
@@ -199,6 +207,7 @@ module.exports = function register(app) {
                 t.today_flag ? 1 : 0,
                 (typeof t.snooze_until === 'string' && t.snooze_until) ? t.snooze_until : null,
                 (typeof t.last_acknowledged_at === 'string' && t.last_acknowledged_at) ? t.last_acknowledged_at : null,
+                createdAt,
                 newTaskId, uid,
               ]
             );
