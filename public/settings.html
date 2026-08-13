@@ -14,7 +14,7 @@
     }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; background: var(--bg); color: var(--ink); }
     header { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; background: var(--bg-col); border-bottom: 1px solid var(--border); }
-    header h1 { font-family: 'SFMono-Regular', Menlo, monospace; font-size: 16px; }
+    header h1 { font-family: 'SFMono-Regular', Menlo, monospace; font-size: 16px; display: flex; align-items: center; gap: 8px; }
     header nav { display: flex; gap: 12px; align-items: center; }
     header a { color: var(--ink-mid); text-decoration: none; font-size: 13px; }
     header a:hover { color: var(--ink); }
@@ -57,7 +57,7 @@
 </head>
 <body>
 <header>
-  <h1>taskpapr settings</h1>
+  <h1><img src="/icons/mark.svg" alt="" width="18" height="18" /> taskpapr settings</h1>
   <nav>
     <a id="admin-link" href="/admin" style="display:none">Admin</a>
     <a href="/">← Back to board</a>
