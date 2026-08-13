@@ -4,8 +4,12 @@ on:
   push:
     branches: ["main"]
   # No branch filter: stacked PRs (feature → feature) must run CI too,
-  # not just PRs targeting main.
+  # not just PRs targeting main. Explicit types add labeled/unlabeled to the
+  # opened/synchronize/reopened default, so adding the version-bump-check's
+  # 'no-version-bump' exemption label after opening a PR actually re-runs
+  # the check instead of leaving a stale failure sitting there.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
   version-bump-check:
