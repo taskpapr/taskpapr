@@ -726,12 +726,21 @@ function refreshColumn(el, col) {
   // Rebuild the inner content but keep the element itself (so drag state isn't lost)
   const wasDragging = el.classList.contains('col-dragging');
 
-  // Skip re-render if user has an active edit inside this column — avoids stomping
-  // in-progress title edits (contentEditable) or the add-task input.
-  // The next poll cycle will pick up server state once the edit completes.
+  // Skip re-render if user has an active text edit inside this column — avoids
+  // stomping in-progress title edits (contentEditable), the add-task input, or
+  // a column-rename input. The next poll cycle will pick up server state once
+  // the edit completes.
+  //
+  // Checkboxes are deliberately excluded: clicking one to complete a task
+  // makes it document.activeElement in every major browser, so this guard
+  // used to also swallow the re-render that toggleDone() triggers right
+  // after — the task never got its "done" styling and the Clear-done row
+  // never appeared until a full page reload. There's no in-progress edit to
+  // protect on a checkbox; the click is already complete by the time
+  // 'change' fires.
   if (el.contains(document.activeElement) &&
       (document.activeElement.contentEditable === 'true' ||
-       document.activeElement.tagName === 'INPUT')) return;
+       (document.activeElement.tagName === 'INPUT' && document.activeElement.type !== 'checkbox'))) return;
 
   // Replace header
   const oldHeader = el.querySelector('.column-header');
