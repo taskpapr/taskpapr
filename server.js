@@ -7,7 +7,6 @@ const helmet  = require('helmet');
 
 const {
   queries,
-  queryOne,
   queryRun,
   withSchedulerLock,
   pool,
@@ -191,14 +190,15 @@ async function start() {
     res.sendFile(path.join(__dirname, 'public', 'login.html'));
   });
 
-  // ── Health check (unauthenticated) ─────────────────────────
-  app.get('/health', async (req, res) => {
-    try {
-      await queryOne('SELECT 1');
-      res.json({ ok: true, uptime: process.uptime() });
-    } catch (_) {
-      res.status(503).json({ ok: false });
-    }
+  // ── Health check (unauthenticated) ──────────────────────────
+  // Liveness only — no DB round-trip. Render polls this path continuously
+  // for the life of every running instance, well under Neon's 5-minute
+  // scale-to-zero idle timeout, so a per-request SELECT 1 here keeps the
+  // database compute permanently active instead of suspending (Neon's own
+  // cost-optimization guide flags exactly this pattern). A DB blip should
+  // surface through real request errors, not through the liveness probe.
+  app.get('/health', (req, res) => {
+    res.json({ ok: true, uptime: process.uptime() });
   });
 
   // ── Auth + subscription gate ────────────────────────────────
