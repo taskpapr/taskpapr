@@ -8,6 +8,37 @@ on:
   pull_request:
 
 jobs:
+  version-bump-check:
+    name: Version bump check
+    runs-on: ubuntu-latest
+    # Only PRs actually landing on staging/main — not every feature->feature
+    # stacked PR in between, which may legitimately not have bumped yet.
+    if: >
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.base.ref == 'staging' || github.event.pull_request.base.ref == 'main')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
+
+      - name: Compare package.json version against base branch
+        env:
+          HAS_SKIP_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'no-version-bump') }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "$HAS_SKIP_LABEL" = "true" ]; then
+            echo "Skipped — 'no-version-bump' label present."
+            exit 0
+          fi
+          BASE_VERSION=$(git show "origin/$BASE_REF:package.json" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).version))")
+          HEAD_VERSION=$(node -p "require('./package.json').version")
+          if [ "$BASE_VERSION" = "$HEAD_VERSION" ]; then
+            echo "::error::package.json version ($HEAD_VERSION) is unchanged from '$BASE_REF'. Every PR into staging/main should bump the patch version — run 'npm version patch --no-git-tag-version' and commit it. If this PR genuinely doesn't warrant one (docs-only, CI-only, test-only changes), add the 'no-version-bump' label to skip this check."
+            exit 1
+          fi
+          echo "Version bumped: $BASE_VERSION -> $HEAD_VERSION"
+
   smoke-test:
     name: Smoke test
     runs-on: ubuntu-latest
