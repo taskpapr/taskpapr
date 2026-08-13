@@ -87,7 +87,7 @@ async function checkDueTasks(opts = {}) {
       ORDER BY t.next_due ASC, t.id ASC
     `, [user.id, tomorrowStr]);
 
-    if (tasks.length === 0) {
+    if (tasks.length === 0 && !testMode) {
       console.log(`[telegram] user ${user.id} — no tasks due/overdue`);
       results.push({ user_id: user.id, sent: false, note: 'No tasks due or overdue', message: null });
       continue;
