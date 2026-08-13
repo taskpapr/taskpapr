@@ -1,6 +1,6 @@
 {
   "name": "taskpapr",
-  "version": "0.45.7",
+  "version": "0.45.8",
   "description": "A minimal, paper-inspired task board for the frictionless mind",
   "repository": {
     "type": "git",
