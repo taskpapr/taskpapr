@@ -279,6 +279,132 @@ server.tool(
   }
 );
 
+// ── Tool: update_task ────────────────────────────────────────
+server.tool(
+  'update_task',
+  'Update an existing task: rename it, move it to a different tile, assign or clear its goal, ' +
+  'change its status, or replace its notes. This is a partial update — only the fields you ' +
+  'supply are changed. Find the task by id (preferred) or by matching its current title via ' +
+  'title_match, which must resolve to exactly one task or the call returns candidates instead ' +
+  'of guessing. Note: notes here REPLACES the notes field entirely — to append to existing ' +
+  'notes use the append_task_note tool instead.',
+  {
+    id:          z.number().int().optional().describe('Task id (preferred if known). Unambiguous.'),
+    title_match: z.string().optional().describe('Partial, case-insensitive match against the task\'s CURRENT title, used to find it if id is not provided. Must resolve to exactly one task.'),
+    title:       z.string().optional().describe('New title to rename the task to.'),
+    tile:        z.string().optional().describe('Name of the tile to move the task to. Case-insensitive partial match against existing tile names.'),
+    goal:        z.union([z.string(), z.null()]).optional().describe('Goal title to assign (case-insensitive partial match against existing goals), or null to clear the task\'s goal.'),
+    status:      z.enum(['active', 'wip', 'done', 'dormant']).optional().describe('New status for the task.'),
+    notes:       z.string().optional().describe('Replaces the task\'s notes entirely. Does not append.'),
+  },
+  async ({ id, title_match, title, tile, goal, status, notes }) => {
+    if (!id && !title_match) {
+      return { content: [{ type: 'text', text: 'Provide either id or title_match to identify the task.' }] };
+    }
+
+    const hasUpdate = title !== undefined || tile !== undefined || goal !== undefined ||
+      status !== undefined || notes !== undefined;
+    if (!hasUpdate) {
+      return { content: [{ type: 'text', text: 'Provide at least one field to update: title, tile, goal, status, or notes.' }] };
+    }
+
+    const [tasks, columns] = await Promise.all([
+      api('GET', '/api/tasks'),
+      api('GET', '/api/columns'),
+    ]);
+
+    let task;
+    if (id) {
+      task = tasks.find(t => t.id === id);
+      if (!task) {
+        return { content: [{ type: 'text', text: `Task not found: id ${id}` }] };
+      }
+    } else {
+      const needle  = title_match.toLowerCase();
+      const matches = tasks.filter(t => t.title.toLowerCase().includes(needle));
+
+      if (matches.length === 0) {
+        return { content: [{ type: 'text', text: `Task not found: "${title_match}"` }] };
+      }
+      if (matches.length > 1) {
+        const candidates = matches.map(t => ({
+          id:    t.id,
+          title: t.title,
+          tile:  columns.find(c => c.id === t.column_id)?.name || '?',
+        }));
+        return {
+          content: [{
+            type: 'text',
+            text: `"${title_match}" matches ${matches.length} tasks — ambiguous, nothing updated. ` +
+                  `Retry with a specific id:\n${JSON.stringify(candidates, null, 2)}`,
+          }],
+        };
+      }
+      task = matches[0];
+    }
+
+    const patch = {};
+    let destTileName;
+
+    if (title !== undefined) {
+      patch.title = title.trim();
+    }
+
+    if (tile !== undefined) {
+      const col = columns.find(c => c.name.toLowerCase().includes(tile.toLowerCase()));
+      if (!col) {
+        return { content: [{ type: 'text', text: `No tile found matching "${tile}". Available tiles: ${columns.map(c => c.name).join(', ')}` }] };
+      }
+      const destTasks = tasks.filter(t => t.column_id === col.id);
+      const maxPos = destTasks.reduce((max, t) => Math.max(max, t.position || 0), 0);
+      patch.column_id = col.id;
+      patch.position  = maxPos + 1;
+      destTileName    = col.name;
+    }
+
+    if (goal !== undefined) {
+      if (goal === null) {
+        patch.goal_id = null;
+      } else {
+        const goals       = await api('GET', '/api/goals');
+        const goalMatches = goals.filter(g => g.title.toLowerCase().includes(goal.toLowerCase()));
+        if (goalMatches.length === 0) {
+          return { content: [{ type: 'text', text: `No goal found matching "${goal}". Available goals: ${goals.map(g => g.title).join(', ')}` }] };
+        }
+        if (goalMatches.length > 1) {
+          return {
+            content: [{
+              type: 'text',
+              text: `"${goal}" matches ${goalMatches.length} goals — ambiguous, nothing updated. ` +
+                    `Retry with a more specific name:\n${JSON.stringify(goalMatches.map(g => ({ id: g.id, title: g.title })), null, 2)}`,
+            }],
+          };
+        }
+        patch.goal_id = goalMatches[0].id;
+      }
+    }
+
+    if (status !== undefined) {
+      patch.status = status;
+    }
+
+    if (notes !== undefined) {
+      patch.notes = notes;
+    }
+
+    const updated = await api('PATCH', `/api/tasks/${task.id}`, patch);
+
+    const changes = [];
+    if (title !== undefined)  changes.push(`title → "${updated.title}"`);
+    if (tile !== undefined)   changes.push(`tile → "${destTileName}"`);
+    if (goal !== undefined)   changes.push(goal === null ? 'goal cleared' : `goal → "${goal}"`);
+    if (status !== undefined) changes.push(`status → ${status}`);
+    if (notes !== undefined)  changes.push('notes replaced');
+
+    return { content: [{ type: 'text', text: `✓ Updated task ${task.id} "${updated.title}": ${changes.join(', ')}` }] };
+  }
+);
+
 // ── Tool: delete_task ────────────────────────────────────────
 server.tool(
   'delete_task',
