@@ -489,6 +489,77 @@ server.tool(
   }
 );
 
+// ── Tool: append_task_note ───────────────────────────────────
+server.tool(
+  'append_task_note',
+  'Append text to a task\'s notes, preserving whatever is already there. The appended text is ' +
+  'prefixed with a provenance marker ("— via MCP, YYYY-MM-DD") so it\'s visibly distinguishable ' +
+  'from notes the user typed themselves. To replace notes entirely instead of appending, use ' +
+  'update_task\'s notes field. Find the task by id (preferred) or by matching its current title ' +
+  'via title_match, which must resolve to exactly one task or the call returns candidates instead ' +
+  'of guessing.',
+  {
+    id:          z.number().int().optional().describe('Task id (preferred if known). Unambiguous.'),
+    title_match: z.string().optional().describe('Partial, case-insensitive match against the task\'s CURRENT title, used to find it if id is not provided. Must resolve to exactly one task.'),
+    note:        z.string().describe('The note text to append.'),
+  },
+  async ({ id, title_match, note }) => {
+    if (!id && !title_match) {
+      return { content: [{ type: 'text', text: 'Provide either id or title_match to identify the task.' }] };
+    }
+
+    if (!note || !note.trim()) {
+      return { content: [{ type: 'text', text: 'Provide non-empty note text to append.' }] };
+    }
+
+    const [tasks, columns] = await Promise.all([
+      api('GET', '/api/tasks'),
+      api('GET', '/api/columns'),
+    ]);
+
+    let task;
+    if (id) {
+      task = tasks.find(t => t.id === id);
+      if (!task) {
+        return { content: [{ type: 'text', text: `Task not found: id ${id}` }] };
+      }
+    } else {
+      const needle  = title_match.toLowerCase();
+      const matches = tasks.filter(t => t.title.toLowerCase().includes(needle));
+
+      if (matches.length === 0) {
+        return { content: [{ type: 'text', text: `Task not found: "${title_match}"` }] };
+      }
+      if (matches.length > 1) {
+        const candidates = matches.map(t => ({
+          id:    t.id,
+          title: t.title,
+          tile:  columns.find(c => c.id === t.column_id)?.name || '?',
+        }));
+        return {
+          content: [{
+            type: 'text',
+            text: `"${title_match}" matches ${matches.length} tasks — ambiguous, nothing appended. ` +
+                  `Retry with a specific id:\n${JSON.stringify(candidates, null, 2)}`,
+          }],
+        };
+      }
+      task = matches[0];
+    }
+
+    const today  = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const marker = `— via MCP, ${today}`;
+    const entry  = `${marker}\n${note.trim()}`;
+
+    const existingNotes = (task.notes || '').trim();
+    const newNotes = existingNotes ? `${existingNotes}\n\n${entry}` : entry;
+
+    await api('PATCH', `/api/tasks/${task.id}`, { notes: newNotes });
+
+    return { content: [{ type: 'text', text: `✓ Appended note to task ${task.id} "${task.title}" (marked "${marker}")` }] };
+  }
+);
+
 // ── Tool: delete_task ────────────────────────────────────────
 server.tool(
   'delete_task',
