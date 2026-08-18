@@ -560,6 +560,94 @@ server.tool(
   }
 );
 
+// ── Tool: snooze_task ────────────────────────────────────────
+server.tool(
+  'snooze_task',
+  'Snooze a task — hide it from the active board until a later date, without touching its due ' +
+  'date. With no duration argument, this is the existing fixed 24h snooze (same as clicking ' +
+  '"Snooze" in the app). Pass hours and/or days to snooze for a specific duration from now ' +
+  '(combined additively if both given), or an explicit until date (ISO, e.g. "2026-09-01") to ' +
+  'snooze until that exact date — until takes priority over hours/days if more than one is given. ' +
+  'Find the task by id (preferred) or by matching its current title via title_match, which must ' +
+  'resolve to exactly one non-done task or the call returns candidates instead of guessing. ' +
+  'Cannot snooze an already-completed task.',
+  {
+    id:          z.number().int().optional().describe('Task id (preferred if known). Unambiguous.'),
+    title_match: z.string().optional().describe('Partial, case-insensitive match against the task\'s CURRENT title, used to find it if id is not provided. Must resolve to exactly one non-done task.'),
+    until:       z.string().optional().describe('ISO date to snooze until, e.g. "2026-09-01". Takes priority over hours/days if both are given.'),
+    hours:       z.number().optional().describe('Snooze for this many hours from now. Combines additively with days if both are given. Ignored if until is given.'),
+    days:        z.number().optional().describe('Snooze for this many days from now. Combines additively with hours if both are given. Ignored if until is given.'),
+  },
+  async ({ id, title_match, until, hours, days }) => {
+    if (!id && !title_match) {
+      return { content: [{ type: 'text', text: 'Provide either id or title_match to identify the task.' }] };
+    }
+
+    const tasks = await api('GET', '/api/tasks');
+
+    let task;
+    if (id) {
+      task = tasks.find(t => t.id === id);
+      if (!task) {
+        return { content: [{ type: 'text', text: `Task not found: id ${id}` }] };
+      }
+    } else {
+      const needle  = title_match.toLowerCase();
+      const matches = tasks.filter(t => t.status !== 'done' && t.title.toLowerCase().includes(needle));
+
+      if (matches.length === 0) {
+        return { content: [{ type: 'text', text: `Task not found: "${title_match}"` }] };
+      }
+      if (matches.length > 1) {
+        const columns    = await api('GET', '/api/columns');
+        const candidates = matches.map(t => ({
+          id:    t.id,
+          title: t.title,
+          tile:  columns.find(c => c.id === t.column_id)?.name || '?',
+        }));
+        return {
+          content: [{
+            type: 'text',
+            text: `"${title_match}" matches ${matches.length} tasks — ambiguous, nothing snoozed. ` +
+                  `Retry with a specific id:\n${JSON.stringify(candidates, null, 2)}`,
+          }],
+        };
+      }
+      task = matches[0];
+    }
+
+    if (task.status === 'done') {
+      return { content: [{ type: 'text', text: `Cannot snooze task ${task.id} "${task.title}" — it's already done.` }] };
+    }
+
+    const hasDuration = until !== undefined || hours !== undefined || days !== undefined;
+
+    let updated;
+    if (!hasDuration) {
+      // No duration supplied — unchanged fixed 24h snooze behaviour.
+      updated = await api('POST', `/api/tasks/${task.id}/snooze`);
+    } else {
+      let targetDate;
+      if (until !== undefined) {
+        targetDate = new Date(until);
+        if (isNaN(targetDate.getTime())) {
+          return { content: [{ type: 'text', text: `"${until}" is not a valid date.` }] };
+        }
+      } else {
+        const ms = (days || 0) * 24 * 60 * 60 * 1000 + (hours || 0) * 60 * 60 * 1000;
+        if (ms <= 0) {
+          return { content: [{ type: 'text', text: 'Provide a positive hours and/or days value, or an until date.' }] };
+        }
+        targetDate = new Date(Date.now() + ms);
+      }
+      const snoozeUntil = targetDate.toISOString().slice(0, 10);
+      updated = await api('PATCH', `/api/tasks/${task.id}`, { snooze_until: snoozeUntil });
+    }
+
+    return { content: [{ type: 'text', text: `✓ Snoozed task ${task.id} "${task.title}" — reappears on ${updated.snooze_until}.` }] };
+  }
+);
+
 // ── Tool: delete_task ────────────────────────────────────────
 server.tool(
   'delete_task',
