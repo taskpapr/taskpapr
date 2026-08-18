@@ -188,6 +188,90 @@ server.tool(
   }
 );
 
+// ── Tool: search_tasks ───────────────────────────────────────
+server.tool(
+  'search_tasks',
+  'Search tasks by title (and optionally notes) substring, with optional tile/goal/status ' +
+  'filters. Use this to find a task before a follow-up call like update_task or delete_task — ' +
+  'results include id, title, tile, status, and goal so you can pick the right one safely. ' +
+  'Defaults to non-done tasks (active, wip, dormant); pass status: "all" to include done tasks too.',
+  {
+    query:         z.string().describe('Substring to search for, case-insensitive. Matched against task titles, and also against notes when include_notes is true.'),
+    status:        z.enum(['active', 'wip', 'done', 'dormant', 'all']).optional().describe('Filter by status. Defaults to all non-done statuses (active, wip, dormant).'),
+    tile:          z.string().optional().describe('Tile (column) name to filter by. Case-insensitive partial match.'),
+    goal:          z.string().optional().describe('Goal title to filter by. Case-insensitive partial match.'),
+    include_notes: z.boolean().optional().describe('Also match query against task notes, not just titles. Defaults to false (titles only).'),
+    limit:         z.number().int().positive().optional().describe('Maximum number of results to return, applied after filtering.'),
+  },
+  async ({ query, status, tile, goal, include_notes, limit }) => {
+    const [columns, tasks, goals] = await Promise.all([
+      api('GET', '/api/columns'),
+      api('GET', '/api/tasks'),
+      api('GET', '/api/goals'),
+    ]);
+
+    let filtered = tasks;
+
+    if (status === 'all') {
+      // no status filter
+    } else if (status) {
+      filtered = filtered.filter(t => t.status === status);
+    } else {
+      filtered = filtered.filter(t => t.status !== 'done');
+    }
+
+    if (tile) {
+      const col = columns.find(c => c.name.toLowerCase().includes(tile.toLowerCase()));
+      if (!col) {
+        return { content: [{ type: 'text', text: `No tile found matching "${tile}". Available tiles: ${columns.map(c => c.name).join(', ')}` }] };
+      }
+      filtered = filtered.filter(t => t.column_id === col.id);
+    }
+
+    if (goal) {
+      const goalMatches = goals.filter(g => g.title.toLowerCase().includes(goal.toLowerCase()));
+      if (goalMatches.length === 0) {
+        return { content: [{ type: 'text', text: `No goal found matching "${goal}". Available goals: ${goals.map(g => g.title).join(', ')}` }] };
+      }
+      const goalIds = new Set(goalMatches.map(g => g.id));
+      filtered = filtered.filter(t => goalIds.has(t.goal_id));
+    }
+
+    const needle = query.toLowerCase();
+    filtered = filtered.filter(t => {
+      if (t.title.toLowerCase().includes(needle)) return true;
+      if (include_notes && (t.notes || '').toLowerCase().includes(needle)) return true;
+      return false;
+    });
+
+    if (filtered.length === 0) {
+      return { content: [{ type: 'text', text: `No matches for "${query}"${tile ? ` in "${tile}"` : ''}${goal ? ` with goal "${goal}"` : ''}.` }] };
+    }
+
+    const totalMatches = filtered.length;
+    if (limit !== undefined) {
+      filtered = filtered.slice(0, limit);
+    }
+
+    const result = filtered.map(t => {
+      const col      = columns.find(c => c.id === t.column_id);
+      const goalObj  = goals.find(g => g.id === t.goal_id);
+      return {
+        id:     t.id,
+        title:  t.title,
+        status: t.status,
+        tile:   col?.name || '?',
+        goal:   goalObj?.title || null,
+      };
+    });
+
+    const header = totalMatches > result.length
+      ? `Showing ${result.length} of ${totalMatches} matches (limit applied):\n`
+      : '';
+    return { content: [{ type: 'text', text: header + JSON.stringify(result, null, 2) }] };
+  }
+);
+
 // ── Tool: add_task ───────────────────────────────────────────
 server.tool(
   'add_task',
