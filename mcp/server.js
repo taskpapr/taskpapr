@@ -648,6 +648,224 @@ server.tool(
   }
 );
 
+// ── Tool: list_today_tasks ───────────────────────────────────
+server.tool(
+  'list_today_tasks',
+  'List tasks flagged for Today, in Today order. Ordering matches the app\'s Today tile exactly ' +
+  '(public/app.js): ascending by today_order, with a missing today_order treated as 9999 (so it ' +
+  'sorts before a task freshly added via add_task_to_today, which is stamped with a much larger ' +
+  'timestamp), tiebroken by position within its tile. Completed (done) tasks are excluded even if ' +
+  'still flagged, matching what the Today tile actually shows on the board.',
+  {},
+  async () => {
+    const [tasks, columns, goals] = await Promise.all([
+      api('GET', '/api/tasks'),
+      api('GET', '/api/columns'),
+      api('GET', '/api/goals'),
+    ]);
+
+    const today = tasks
+      .filter(t => t.today_flag && t.status !== 'done')
+      .sort((a, b) => {
+        const oa = a.today_order != null ? a.today_order : 9999;
+        const ob = b.today_order != null ? b.today_order : 9999;
+        return oa - ob || (a.position || 0) - (b.position || 0);
+      });
+
+    if (today.length === 0) {
+      return { content: [{ type: 'text', text: 'No tasks in Today.' }] };
+    }
+
+    const result = today.map(t => {
+      const col  = columns.find(c => c.id === t.column_id);
+      const goal = goals.find(g => g.id === t.goal_id);
+      return {
+        id:          t.id,
+        title:       t.title,
+        status:      t.status,
+        tile:        col?.name || '?',
+        goal:        goal?.title || null,
+        today_order: t.today_order ?? null,
+      };
+    });
+
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+// ── Tool: add_task_to_today ──────────────────────────────────
+server.tool(
+  'add_task_to_today',
+  'Add an existing task to Today by setting its today_flag. Find the task by id (preferred) or by ' +
+  'matching its current title via title_match, which must resolve to exactly one task or the call ' +
+  'returns candidates instead of guessing. The task is appended to the end of Today — stamped with ' +
+  'a fresh order value newer than anything already there, the same way the app\'s Today toggle ' +
+  'behaves — so it lands last; use reorder_today_tasks afterward for a specific position. A no-op ' +
+  '(reported, not an error) if the task is already in Today.',
+  {
+    id:          z.number().int().optional().describe('Task id (preferred if known). Unambiguous.'),
+    title_match: z.string().optional().describe('Partial, case-insensitive match against the task\'s CURRENT title, used to find it if id is not provided. Must resolve to exactly one task.'),
+  },
+  async ({ id, title_match }) => {
+    if (!id && !title_match) {
+      return { content: [{ type: 'text', text: 'Provide either id or title_match to identify the task.' }] };
+    }
+
+    const [tasks, columns] = await Promise.all([
+      api('GET', '/api/tasks'),
+      api('GET', '/api/columns'),
+    ]);
+
+    let task;
+    if (id) {
+      task = tasks.find(t => t.id === id);
+      if (!task) {
+        return { content: [{ type: 'text', text: `Task not found: id ${id}` }] };
+      }
+    } else {
+      const needle  = title_match.toLowerCase();
+      const matches = tasks.filter(t => t.title.toLowerCase().includes(needle));
+
+      if (matches.length === 0) {
+        return { content: [{ type: 'text', text: `Task not found: "${title_match}"` }] };
+      }
+      if (matches.length > 1) {
+        const candidates = matches.map(t => ({
+          id:    t.id,
+          title: t.title,
+          tile:  columns.find(c => c.id === t.column_id)?.name || '?',
+        }));
+        return {
+          content: [{
+            type: 'text',
+            text: `"${title_match}" matches ${matches.length} tasks — ambiguous, nothing added to Today. ` +
+                  `Retry with a specific id:\n${JSON.stringify(candidates, null, 2)}`,
+          }],
+        };
+      }
+      task = matches[0];
+    }
+
+    if (task.today_flag) {
+      return { content: [{ type: 'text', text: `Task ${task.id} "${task.title}" is already in Today.` }] };
+    }
+
+    const updated = await api('PATCH', `/api/tasks/${task.id}`, { today_flag: true, today_order: Date.now() });
+    return { content: [{ type: 'text', text: `✓ Added to Today: task ${updated.id} "${updated.title}"` }] };
+  }
+);
+
+// ── Tool: remove_task_from_today ─────────────────────────────
+server.tool(
+  'remove_task_from_today',
+  'Remove a task from Today by clearing its today_flag. Also clears today_order (sets it to null) ' +
+  'so the task doesn\'t carry stale ordering if it\'s re-added later — matches the app\'s Today ' +
+  'toggle behavior exactly. Find the task by id (preferred) or by matching its current title via ' +
+  'title_match, which must resolve to exactly one task or the call returns candidates instead of ' +
+  'guessing. A no-op (reported, not an error) if the task isn\'t in Today.',
+  {
+    id:          z.number().int().optional().describe('Task id (preferred if known). Unambiguous.'),
+    title_match: z.string().optional().describe('Partial, case-insensitive match against the task\'s CURRENT title, used to find it if id is not provided. Must resolve to exactly one task.'),
+  },
+  async ({ id, title_match }) => {
+    if (!id && !title_match) {
+      return { content: [{ type: 'text', text: 'Provide either id or title_match to identify the task.' }] };
+    }
+
+    const [tasks, columns] = await Promise.all([
+      api('GET', '/api/tasks'),
+      api('GET', '/api/columns'),
+    ]);
+
+    let task;
+    if (id) {
+      task = tasks.find(t => t.id === id);
+      if (!task) {
+        return { content: [{ type: 'text', text: `Task not found: id ${id}` }] };
+      }
+    } else {
+      const needle  = title_match.toLowerCase();
+      const matches = tasks.filter(t => t.title.toLowerCase().includes(needle));
+
+      if (matches.length === 0) {
+        return { content: [{ type: 'text', text: `Task not found: "${title_match}"` }] };
+      }
+      if (matches.length > 1) {
+        const candidates = matches.map(t => ({
+          id:    t.id,
+          title: t.title,
+          tile:  columns.find(c => c.id === t.column_id)?.name || '?',
+        }));
+        return {
+          content: [{
+            type: 'text',
+            text: `"${title_match}" matches ${matches.length} tasks — ambiguous, nothing removed from Today. ` +
+                  `Retry with a specific id:\n${JSON.stringify(candidates, null, 2)}`,
+          }],
+        };
+      }
+      task = matches[0];
+    }
+
+    if (!task.today_flag) {
+      return { content: [{ type: 'text', text: `Task ${task.id} "${task.title}" is not in Today.` }] };
+    }
+
+    const updated = await api('PATCH', `/api/tasks/${task.id}`, { today_flag: false, today_order: null });
+    return { content: [{ type: 'text', text: `✓ Removed from Today: task ${updated.id} "${updated.title}"` }] };
+  }
+);
+
+// ── Tool: reorder_today_tasks ────────────────────────────────
+server.tool(
+  'reorder_today_tasks',
+  'Reorder the tasks currently in Today. Pass task_ids as the full desired order (an array of task ' +
+  'ids, first to last); each task\'s today_order is set to its 0-based index in that array (first ' +
+  'id → 0, second → 1, ...) — the same 0-based scheme the app\'s drag-to-reorder in the Today tile ' +
+  'uses. Every id must already be flagged for Today: this tool will NOT silently flag a task into ' +
+  'Today just because it appears in task_ids — call add_task_to_today first for anything not ' +
+  'already there. All ids are validated against the current task list before anything is changed: ' +
+  'if any id doesn\'t exist, or exists but isn\'t currently in Today, the whole call is rejected ' +
+  'with a clear message listing the offending ids and nothing is updated.',
+  {
+    task_ids: z.array(z.number().int()).describe('Task ids in the desired Today order, first to last. Each must already be flagged for Today (today_flag true).'),
+  },
+  async ({ task_ids }) => {
+    if (!task_ids || task_ids.length === 0) {
+      return { content: [{ type: 'text', text: 'Provide a non-empty task_ids array.' }] };
+    }
+
+    const tasks = await api('GET', '/api/tasks');
+    const byId  = new Map(tasks.map(t => [t.id, t]));
+
+    const missing = task_ids.filter(id => !byId.has(id));
+    if (missing.length > 0) {
+      return { content: [{ type: 'text', text: `Task id(s) not found: ${missing.join(', ')}. Nothing reordered.` }] };
+    }
+
+    const notInToday = task_ids.filter(id => !byId.get(id).today_flag);
+    if (notInToday.length > 0) {
+      const details = notInToday.map(id => ({ id, title: byId.get(id).title }));
+      return {
+        content: [{
+          type: 'text',
+          text: `Task id(s) not currently in Today: ${JSON.stringify(details, null, 2)}. ` +
+                `Add them to Today first with add_task_to_today, then retry. Nothing reordered.`,
+        }],
+      };
+    }
+
+    const updates = [];
+    for (let i = 0; i < task_ids.length; i++) {
+      const id      = task_ids[i];
+      const updated = await api('PATCH', `/api/tasks/${id}`, { today_order: i });
+      updates.push({ id: updated.id, title: updated.title, today_order: updated.today_order });
+    }
+
+    return { content: [{ type: 'text', text: `✓ Reordered Today (${updates.length} tasks):\n${JSON.stringify(updates, null, 2)}` }] };
+  }
+);
+
 // ── Tool: delete_task ────────────────────────────────────────
 server.tool(
   'delete_task',
