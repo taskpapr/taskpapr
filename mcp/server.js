@@ -277,15 +277,30 @@ server.tool(
   'add_task',
   'Add a new task to a tile on the taskpapr board.',
   {
-    title:     z.string().describe('The task title/description.'),
-    tile:      z.string().describe('Name of the tile to add the task to. If unsure, use "Work" or "Personal". Must match an existing tile name.'),
-    goal:      z.string().optional().describe('Optional: goal title to associate with this task. Must match an existing goal name.'),
+    title:           z.string().describe('The task title/description.'),
+    tile:            z.string().describe('Name of the tile to add the task to. If unsure, use "Work" or "Personal". Must match an existing tile name.'),
+    goal:            z.string().optional().describe('Optional: goal title to associate with this task. Must match an existing goal name.'),
+    allow_duplicate: z.boolean().optional().default(false).describe('Set true to skip the exact-match duplicate check and create the task anyway.'),
   },
-  async ({ title, tile, goal }) => {
+  async ({ title, tile, goal, allow_duplicate }) => {
     const columns = await api('GET', '/api/columns');
     const col     = columns.find(c => c.name.toLowerCase().includes(tile.toLowerCase()));
     if (!col) {
       return { content: [{ type: 'text', text: `No tile found matching "${tile}". Available tiles: ${columns.map(c => c.name).join(', ')}` }] };
+    }
+
+    const trimmedTitle = title.trim();
+
+    if (!allow_duplicate) {
+      const tasks = await api('GET', '/api/tasks');
+      const dup = tasks.find(t =>
+        t.column_id === col.id &&
+        t.status !== 'done' &&
+        t.title.trim().toLowerCase() === trimmedTitle.toLowerCase()
+      );
+      if (dup) {
+        return { content: [{ type: 'text', text: `⚠ Possible duplicate: an existing task in "${col.name}" already has this exact title — "${dup.title}" (id: ${dup.id}, status: ${dup.status}). Task not created. Pass allow_duplicate: true to add it anyway.` }] };
+      }
     }
 
     let goalId = null;
@@ -296,7 +311,7 @@ server.tool(
     }
 
     const task = await api('POST', '/api/tasks', {
-      title:     title.trim(),
+      title:     trimmedTitle,
       column_id: col.id,
       goal_id:   goalId,
     });
