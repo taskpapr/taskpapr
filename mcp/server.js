@@ -282,27 +282,71 @@ server.tool(
 // ── Tool: delete_task ────────────────────────────────────────
 server.tool(
   'delete_task',
-  'Permanently delete a task. Use with care. Can find it by id or title.',
+  'PERMANENTLY delete a task. This cannot be undone. Deleting by id is unambiguous ' +
+  'and happens immediately. Deleting by title requires the title to match exactly ' +
+  'one active/wip/dormant task — if it matches more than one, no task is deleted and ' +
+  'the candidate matches are returned instead so you can retry with a specific id. ' +
+  'Even with a single title match, deletion only proceeds once confirm:true is passed ' +
+  '— the first call without confirm returns the matched task for you to verify before ' +
+  'confirming.',
   {
-    id:    z.number().int().optional().describe('Task id (preferred if known).'),
-    title: z.string().optional().describe('Partial title match to find the task.'),
+    id:      z.number().int().optional().describe('Task id (preferred if known). Unambiguous — deletes immediately, no confirm needed.'),
+    title:   z.string().optional().describe('Partial title match to find the task. Must resolve to exactly one active/wip/dormant task.'),
+    confirm: z.boolean().optional().describe('Required to be true to actually delete when matching by title. Not needed when deleting by id.'),
   },
-  async ({ id, title }) => {
+  async ({ id, title, confirm }) => {
     if (!id && !title) {
       return { content: [{ type: 'text', text: 'Provide either id or title.' }] };
     }
 
     const tasks = await api('GET', '/api/tasks');
-    const task  = id
-      ? tasks.find(t => t.id === id)
-      : tasks.find(t => t.title.toLowerCase().includes(title.toLowerCase()));
 
-    if (!task) {
-      return { content: [{ type: 'text', text: `Task not found: ${id ? `id ${id}` : `"${title}"`}` }] };
+    if (id) {
+      const task = tasks.find(t => t.id === id);
+      if (!task) {
+        return { content: [{ type: 'text', text: `Task not found: id ${id}` }] };
+      }
+      await api('DELETE', `/api/tasks/${task.id}`);
+      return { content: [{ type: 'text', text: `✓ Deleted task ${task.id}: "${task.title}"` }] };
+    }
+
+    const columns  = await api('GET', '/api/columns');
+    const needle   = title.toLowerCase();
+    const matches  = tasks.filter(t => t.status !== 'done' && t.title.toLowerCase().includes(needle));
+
+    if (matches.length === 0) {
+      return { content: [{ type: 'text', text: `Task not found: "${title}"` }] };
+    }
+
+    if (matches.length > 1) {
+      const candidates = matches.map(t => ({
+        id:    t.id,
+        title: t.title,
+        tile:  columns.find(c => c.id === t.column_id)?.name || '?',
+      }));
+      return {
+        content: [{
+          type: 'text',
+          text: `"${title}" matches ${matches.length} tasks — ambiguous, nothing deleted. ` +
+                `Retry with a specific id:\n${JSON.stringify(candidates, null, 2)}`,
+        }],
+      };
+    }
+
+    const task = matches[0];
+
+    if (!confirm) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Found one match: id ${task.id} "${task.title}". This is permanent. ` +
+                `Call delete_task again with id ${task.id} (or title + confirm: true) to delete it.`,
+        }],
+      };
     }
 
     await api('DELETE', `/api/tasks/${task.id}`);
-    return { content: [{ type: 'text', text: `✓ Deleted: "${task.title}"` }] };
+    return { content: [{ type: 'text', text: `✓ Deleted task ${task.id}: "${task.title}"` }] };
   }
 );
 
