@@ -2,8 +2,6 @@
 
 A minimal, paper-inspired task board. No noise, no friction.
 
-**Current version:** v0.45.0
-
 ## The idea
 
 Designed for people who always come back to a blank sheet of paper. Freely draggable tiles on an infinite canvas, tasks you can cross off (and they stay visible), a WIP state, recurring tasks with urgency heat, and a Goals view for the bigger picture.
