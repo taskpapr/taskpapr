@@ -60,6 +60,7 @@ module.exports = function register(app) {
     const titleTrimmed   = title     !== undefined ? title.trim()              : undefined;
     const nextNotes      = req.body.notes        !== undefined ? (req.body.notes        || null) : undefined;
     const nextDue        = req.body.next_due      !== undefined ? (req.body.next_due      || null) : undefined;
+    const nextSnoozeUntil = req.body.snooze_until !== undefined ? (req.body.snooze_until  || null) : undefined;
     const nextRecurrence = req.body.recurrence    !== undefined ? (req.body.recurrence    || null) : undefined;
     const vdParsed       = req.body.visibility_days !== undefined ? parseInt(req.body.visibility_days) : undefined;
     const nextVd         = vdParsed  !== undefined ? (isNaN(vdParsed) ? 3 : vdParsed)  : undefined;
@@ -87,13 +88,19 @@ module.exports = function register(app) {
       position !== undefined || column_id !== undefined || nextNotes !== undefined ||
       nextDue !== undefined || nextRecurrence !== undefined || nextVd !== undefined ||
       nextNoRot !== undefined || nextRot !== undefined || nextColor !== undefined ||
-      nextFlag !== undefined || nextOrd !== undefined || req.body._ack;
+      nextFlag !== undefined || nextOrd !== undefined || nextSnoozeUntil !== undefined || req.body._ack;
     const current = needsCurrent ? await queries.tasks.byId.get(id, uid) : null;
     if (needsCurrent && !current) return res.status(404).json({ error: 'task not found' });
 
     if (position !== undefined && column_id !== undefined) {
       const destCol = await queries.columns.byId.get(column_id, uid);
       if (!destCol) return res.status(403).json({ error: 'forbidden' });
+    }
+
+    // Setting a new snooze (not clearing) on an already-done task makes no
+    // sense — mirrors the same check in POST /api/tasks/:id/snooze.
+    if (nextSnoozeUntil !== undefined && nextSnoozeUntil && current.status === 'done') {
+      return res.status(400).json({ error: 'cannot snooze a completed task' });
     }
 
     // ── 4. All mutations in a single transaction ─────────────────
@@ -121,6 +128,22 @@ module.exports = function register(app) {
       if (nextDue !== undefined && (current.next_due || null) !== nextDue) {
         await queryRun(`UPDATE tasks SET next_due = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextDue, id, uid]);
         await syncDormantState(id, uid);
+      }
+      // snooze_until is a distinct mechanism from next_due/visibility_days-based
+      // dormancy (see services/dormancy.js) — it's handled by its own branch in
+      // wakeDormantTasks(), which only scans status='dormant' rows. So, mirroring
+      // POST /api/tasks/:id/snooze, setting a new snooze date also flips status
+      // to 'dormant' directly here. We deliberately do NOT call syncDormantState()
+      // afterward: it judges dormancy purely off next_due/visibility_days and would
+      // immediately flip status back to 'active' for a task with no next_due,
+      // undoing the snooze. Clearing snooze_until (setting it to null) leaves
+      // status untouched — callers/the sweep own status transitions from there.
+      if (nextSnoozeUntil !== undefined && (current.snooze_until || null) !== nextSnoozeUntil) {
+        if (nextSnoozeUntil) {
+          await queryRun(`UPDATE tasks SET snooze_until = ?, status = 'dormant', updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextSnoozeUntil, id, uid]);
+        } else {
+          await queryRun(`UPDATE tasks SET snooze_until = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextSnoozeUntil, id, uid]);
+        }
       }
       if (nextRecurrence !== undefined && (current.recurrence || null) !== nextRecurrence) {
         await queryRun(`UPDATE tasks SET recurrence = ?, updated_at = ${sqlNowExpr()} WHERE id = ? AND user_id = ?`, [nextRecurrence, id, uid]);
