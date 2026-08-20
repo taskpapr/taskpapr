@@ -738,9 +738,20 @@ function refreshColumn(el, col) {
   // never appeared until a full page reload. There's no in-progress edit to
   // protect on a checkbox; the click is already complete by the time
   // 'change' fires.
+  //
+  // The add-task input is excluded once it's empty for the same reason:
+  // addTask() clears it synchronously on Enter (before its own await
+  // resolves) and then refocuses it, so it's still document.activeElement
+  // when the resulting renderBoard() reaches this guard. With no value to
+  // protect, treating it like an in-progress edit swallowed the very
+  // re-render that was supposed to show the task just added — it never
+  // appeared until a full page reload.
   if (el.contains(document.activeElement) &&
       (document.activeElement.contentEditable === 'true' ||
-       (document.activeElement.tagName === 'INPUT' && document.activeElement.type !== 'checkbox'))) return;
+       (document.activeElement.tagName === 'INPUT' &&
+        document.activeElement.type !== 'checkbox' &&
+        !(document.activeElement.classList.contains('add-task-input') &&
+          document.activeElement.value === '')))) return;
 
   // Replace header
   const oldHeader = el.querySelector('.column-header');
