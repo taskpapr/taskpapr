@@ -121,6 +121,22 @@ All limits are read at startup from a single `const LIMITS = { ... }` block in `
 
 `npm audit --audit-level=high` added to the `smoke-test` CI job. Fails CI on high or critical CVEs. Low/moderate are reported but non-blocking.
 
+### CI: daily dependency audit
+
+`.github/workflows/dependency-audit.yml` runs `npm audit` against the lockfile daily at 07:00 UTC and on manual dispatch, so new advisories surface even when no one is pushing. No tokens are needed. Counts and the advisory list go in the job summary; the run fails on high or critical findings, or if the audit can't run. Results are posted to Slack when these optional secrets are set:
+
+| Secret | Purpose |
+|--------|---------|
+| `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`, `chat:write` scope). Notification is skipped if unset |
+| `SLACK_NOTIFY_CHANNEL` | Slack channel ID to post results to |
+
+Snyk monitoring is handled separately by the Snyk GitHub integration (PR checks plus Snyk's own recurring tests), configured in the Snyk web UI rather than in this repo.
+
+--------|----------|---------|
+| `SNYK_TOKEN` | Yes | Snyk API token (app.snyk.io → Account settings → Auth Token) |
+| `SLACK_BOT_TOKEN` | No | Slack bot token (`xoxb-...`, `chat:write` scope). Notification is skipped if unset |
+| `SLACK_NOTIFY_CHANNEL` | No | Slack channel ID to post results to |
+
 ---
 
 ## Part 3: Recommended infrastructure pattern
@@ -332,6 +348,7 @@ interface.
 ## Part 5: Ongoing hygiene
 
 - **`npm audit`** runs in CI on every push. Check the output.
+- **Daily dependency audit** (see *CI: daily dependency audit* above). A red scheduled run means a high or critical finding.
 - **Dependabot** — enable on the GitHub repo (Settings → Code security → Dependabot alerts + Dependabot security updates). Sends PRs for dependency vulnerabilities automatically.
 - **Cloudflare IP ranges** — Cloudflare publishes their current IP ranges at `https://www.cloudflare.com/ips/`. Review the Traefik allowlist when updating Traefik config. Ranges rarely change but do occasionally.
 - **Session secret rotation** — if `SESSION_SECRET` is ever compromised, rotate it (all active sessions will be invalidated; users will need to log in again).

@@ -1,0 +1,192 @@
+name: Dependency audit
+
+# Daily dependency vulnerability scan (scan + notify only; no auto-fix PRs).
+# Uses `npm audit` against the lockfile (GitHub Advisory Database), so no
+# tokens are needed. Snyk monitoring runs separately via the Snyk GitHub
+# integration. Per-PR auditing is the `npm audit` step in ci.yml.
+#
+# Secrets (both optional; Slack is skipped if either is unset):
+#   SLACK_BOT_TOKEN       xoxb- bot token with chat:write
+#   SLACK_NOTIFY_CHANNEL  Slack channel ID to post results to
+#
+# Slack is only posted to on scheduled / manual runs.
+# The job fails (red run) on any high/critical finding or if the audit errors.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch:
+  # Exercise the workflow itself when it changes.
+  pull_request:
+    branches: ["staging", "main"]
+    paths:
+      - ".github/workflows/dependency-audit.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      # Never fails on its own: records status/counts as step outputs so the
+      # summary and Slack steps can report every outcome, then the final
+      # step decides whether the job goes red.
+      - name: Run npm audit
+        id: scan
+        run: |
+          set +e
+          npm audit --package-lock-only --omit=dev --json > audit-results.json 2> audit-stderr.log
+          echo "npm audit exit code: $?"
+
+          node -e '
+            const fs = require("fs");
+            const out = (k, v) => fs.appendFileSync(process.env.GITHUB_OUTPUT, `${k}=${v}\n`);
+            const oneLine = (s) => String(s || "").replace(/\s+/g, " ").trim().slice(0, 300);
+            let r = null;
+            try { r = JSON.parse(fs.readFileSync("audit-results.json", "utf8")); } catch (e) {}
+
+            if (!r || r.error || !r.vulnerabilities) {
+              let err = (r && r.error && (r.error.summary || r.error.code)) || "";
+              if (!err) { try { err = fs.readFileSync("audit-stderr.log", "utf8"); } catch (e) {} }
+              out("status", "error");
+              out("error", oneLine(err) || "npm audit produced no usable output");
+              process.exit(0);
+            }
+
+            // npm reports one entry per vulnerable package; count unique
+            // advisories (the objects in each package `via` list).
+            const seen = new Map();
+            for (const pkg of Object.values(r.vulnerabilities)) {
+              for (const v of pkg.via || []) {
+                if (typeof v !== "object" || seen.has(v.url)) continue;
+                seen.set(v.url, { ...v, fix: pkg.fixAvailable });
+              }
+            }
+            const issues = [...seen.values()];
+            const c = { critical: 0, high: 0, moderate: 0, low: 0 };
+            for (const v of issues) if (v.severity in c) c[v.severity]++;
+            out("status", issues.length ? "vulns" : "clean");
+            out("total", issues.length);
+            for (const [k, n] of Object.entries(c)) out(k, n);
+
+            const order = { critical: 0, high: 1, moderate: 2, low: 3, info: 4 };
+            const md = issues
+              .sort((a, b) => order[a.severity] - order[b.severity])
+              .map(v => `| ${v.severity} | \`${v.name}@${v.range}\` | [${oneLine(v.title).replace(/[|\[\]]/g, " ")}](${v.url}) | ${v.fix ? "yes" : "no"} |`);
+            fs.writeFileSync("audit-issues.md", md.join("\n") + "\n");
+          '
+          exit 0
+
+      - name: Job summary
+        if: always()
+        env:
+          STATUS: ${{ steps.scan.outputs.status }}
+          SCAN_ERROR: ${{ steps.scan.outputs.error }}
+          TOTAL: ${{ steps.scan.outputs.total }}
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+          HIGH: ${{ steps.scan.outputs.high }}
+          MODERATE: ${{ steps.scan.outputs.moderate }}
+          LOW: ${{ steps.scan.outputs.low }}
+        run: |
+          {
+            echo "## Dependency audit"
+            echo
+            case "$STATUS" in
+              clean)
+                echo ":white_check_mark: No vulnerabilities found." ;;
+              vulns)
+                echo "**$TOTAL** unique advisories found."
+                echo
+                echo "| Severity | Count |"
+                echo "|---|---|"
+                echo "| Critical | $CRITICAL |"
+                echo "| High | $HIGH |"
+                echo "| Moderate | $MODERATE |"
+                echo "| Low | $LOW |"
+                echo
+                echo "| Severity | Package (affected range) | Advisory | Fix available |"
+                echo "|---|---|---|---|"
+                cat audit-issues.md 2>/dev/null ;;
+              *)
+                echo ":x: Audit failed to run."
+                echo
+                echo '```'
+                echo "${SCAN_ERROR:-unknown error}"
+                echo '```' ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Slack
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_NOTIFY_CHANNEL: ${{ secrets.SLACK_NOTIFY_CHANNEL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS: ${{ steps.scan.outputs.status }}
+          SCAN_ERROR: ${{ steps.scan.outputs.error }}
+          TOTAL: ${{ steps.scan.outputs.total }}
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+          HIGH: ${{ steps.scan.outputs.high }}
+          MODERATE: ${{ steps.scan.outputs.moderate }}
+          LOW: ${{ steps.scan.outputs.low }}
+        run: |
+          if [ -z "$SLACK_BOT_TOKEN" ] || [ -z "$SLACK_NOTIFY_CHANNEL" ]; then
+            echo "::warning::SLACK_BOT_TOKEN and/or SLACK_NOTIFY_CHANNEL not set — skipping Slack notification."
+            exit 0
+          fi
+          node -e '
+            const e = process.env;
+            const link = `<${e.RUN_URL}|View run>`;
+            let text;
+            if (e.STATUS === "clean") {
+              text = `:white_check_mark: *Dependency audit* — no vulnerabilities found. ${link}`;
+            } else if (e.STATUS === "vulns") {
+              text = `:warning: *Dependency audit* — ${e.TOTAL} advisories found (${e.CRITICAL} critical, ${e.HIGH} high, ${e.MODERATE} moderate, ${e.LOW} low). Manual review needed. ${link}`;
+            } else {
+              const err = (e.SCAN_ERROR || "unknown error").replace(/[<>&]/g, " ");
+              text = `:x: *Dependency audit* — audit failed to run. Error: ${err} ${link}`;
+            }
+            process.stdout.write(JSON.stringify({ channel: e.SLACK_NOTIFY_CHANNEL, text, unfurl_links: false }));
+          ' > slack-payload.json
+          RESP=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data @slack-payload.json)
+          if [ "$(printf '%s' "$RESP" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).ok)}catch(e){console.log(false)}})')" != "true" ]; then
+            echo "::warning::Slack chat.postMessage failed: $(printf '%s' "$RESP" | head -c 300)"
+          fi
+
+      - name: Fail on high/critical findings or audit error
+        if: always()
+        env:
+          STATUS: ${{ steps.scan.outputs.status }}
+          SCAN_ERROR: ${{ steps.scan.outputs.error }}
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+          HIGH: ${{ steps.scan.outputs.high }}
+        run: |
+          if [ "$STATUS" != "clean" ] && [ "$STATUS" != "vulns" ]; then
+            echo "::error::npm audit failed to run: ${SCAN_ERROR:-unknown error}"
+            exit 1
+          fi
+          if [ "${CRITICAL:-0}" -gt 0 ] || [ "${HIGH:-0}" -gt 0 ]; then
+            echo "::error::npm audit found ${CRITICAL:-0} critical and ${HIGH:-0} high severity advisories. See the job summary."
+            exit 1
+          fi
+          echo "No high/critical vulnerabilities."
