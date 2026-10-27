@@ -1,0 +1,217 @@
+name: Snyk
+
+# Daily dependency vulnerability scan (scan + notify only; no auto-fix PRs).
+#
+# Secrets:
+#   SNYK_TOKEN            required — Snyk API token (app.snyk.io → Account settings)
+#   SLACK_BOT_TOKEN       optional — xoxb- bot token with chat:write
+#   SLACK_NOTIFY_CHANNEL  optional — Slack channel ID to post results to
+#
+# Slack is only posted to on scheduled / manual runs, never on PR/push runs.
+# The job fails (red run) on any high/critical finding or if the scan errors.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch:
+  push:
+    branches: ["staging", "main"]
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/snyk.yml"
+  pull_request:
+    branches: ["staging", "main"]
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/snyk.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snyk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  snyk:
+    name: Snyk dependency scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Fork PRs don't receive repository secrets, so a scan there can only
+    # fail on the missing token. Skip them; the push to staging/main after
+    # merge (and the daily schedule) still covers the change.
+    if: >
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      # Never fails on its own: records status/counts as step outputs so the
+      # summary and Slack steps can report every outcome, then the final
+      # step decides whether the job goes red.
+      - name: Run snyk test
+        id: scan
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          SNYK_DISABLE_ANALYTICS: "1"
+          SNYK_VERSION: "1.1308.0"
+        run: |
+          set +e
+          if [ -z "$SNYK_TOKEN" ]; then
+            echo "::error::SNYK_TOKEN secret is not set. Create a token at https://app.snyk.io/account and add it with: gh secret set SNYK_TOKEN -R $GITHUB_REPOSITORY"
+            {
+              echo "status=error"
+              echo "error=SNYK_TOKEN secret is not configured for this repository"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          npx --yes "snyk@${SNYK_VERSION}" test --severity-threshold=low --json \
+            > snyk-results.json 2> snyk-stderr.log
+          SNYK_EXIT=$?
+          echo "snyk exit code: $SNYK_EXIT"
+
+          SNYK_EXIT="$SNYK_EXIT" node -e '
+            const fs = require("fs");
+            const out = (k, v) => fs.appendFileSync(process.env.GITHUB_OUTPUT, `${k}=${v}\n`);
+            const oneLine = (s) => String(s || "").replace(/\s+/g, " ").trim().slice(0, 300);
+            const exit = Number(process.env.SNYK_EXIT);
+            let r = null;
+            try { r = JSON.parse(fs.readFileSync("snyk-results.json", "utf8")); } catch (e) {}
+            if (Array.isArray(r)) r = { vulnerabilities: r.flatMap(p => p.vulnerabilities || []), error: r.map(p => p.error).filter(Boolean).join("; ") };
+
+            // Exit codes: 0 = clean, 1 = vulns found, 2 = failure, 3 = no supported projects.
+            if ((exit !== 0 && exit !== 1) || !r || r.error) {
+              let err = (r && r.error) || "";
+              if (!err) { try { err = fs.readFileSync("snyk-stderr.log", "utf8"); } catch (e) {} }
+              out("status", "error");
+              out("error", oneLine(err) || `snyk exited with code ${exit}`);
+              return;
+            }
+
+            // Snyk reports one entry per dependency path; count unique issues.
+            const seen = new Map();
+            for (const v of r.vulnerabilities || []) {
+              if (!seen.has(v.id)) seen.set(v.id, v);
+            }
+            const issues = [...seen.values()];
+            const c = { critical: 0, high: 0, medium: 0, low: 0 };
+            for (const v of issues) if (v.severity in c) c[v.severity]++;
+            out("status", issues.length ? "vulns" : "clean");
+            out("total", issues.length);
+            for (const [k, n] of Object.entries(c)) out(k, n);
+
+            const order = { critical: 0, high: 1, medium: 2, low: 3 };
+            const md = issues
+              .sort((a, b) => order[a.severity] - order[b.severity])
+              .map(v => `| ${v.severity} | \`${v.packageName}@${v.version}\` | [${oneLine(v.title).replace(/[|\[\]]/g, " ")}](https://security.snyk.io/vuln/${v.id}) | ${v.isUpgradable || v.isPatchable ? "yes" : "no"} |`);
+            fs.writeFileSync("snyk-issues.md", md.join("\n") + "\n");
+          '
+          exit 0
+
+      - name: Job summary
+        if: always()
+        env:
+          STATUS: ${{ steps.scan.outputs.status }}
+          SCAN_ERROR: ${{ steps.scan.outputs.error }}
+          TOTAL: ${{ steps.scan.outputs.total }}
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+          HIGH: ${{ steps.scan.outputs.high }}
+          MEDIUM: ${{ steps.scan.outputs.medium }}
+          LOW: ${{ steps.scan.outputs.low }}
+        run: |
+          {
+            echo "## Snyk dependency scan"
+            echo
+            case "$STATUS" in
+              clean)
+                echo ":white_check_mark: No vulnerabilities found." ;;
+              vulns)
+                echo "**$TOTAL** unique vulnerabilities found."
+                echo
+                echo "| Severity | Count |"
+                echo "|---|---|"
+                echo "| Critical | $CRITICAL |"
+                echo "| High | $HIGH |"
+                echo "| Medium | $MEDIUM |"
+                echo "| Low | $LOW |"
+                echo
+                echo "| Severity | Package | Issue | Fix available |"
+                echo "|---|---|---|---|"
+                cat snyk-issues.md 2>/dev/null ;;
+              *)
+                echo ":x: Scan failed to run."
+                echo
+                echo '```'
+                echo "${SCAN_ERROR:-unknown error}"
+                echo '```' ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Slack
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_NOTIFY_CHANNEL: ${{ secrets.SLACK_NOTIFY_CHANNEL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS: ${{ steps.scan.outputs.status }}
+          SCAN_ERROR: ${{ steps.scan.outputs.error }}
+          TOTAL: ${{ steps.scan.outputs.total }}
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+          HIGH: ${{ steps.scan.outputs.high }}
+          MEDIUM: ${{ steps.scan.outputs.medium }}
+          LOW: ${{ steps.scan.outputs.low }}
+        run: |
+          if [ -z "$SLACK_BOT_TOKEN" ] || [ -z "$SLACK_NOTIFY_CHANNEL" ]; then
+            echo "::warning::SLACK_BOT_TOKEN and/or SLACK_NOTIFY_CHANNEL not set — skipping Slack notification."
+            exit 0
+          fi
+          node -e '
+            const e = process.env;
+            const link = `<${e.RUN_URL}|View run>`;
+            let text;
+            if (e.STATUS === "clean") {
+              text = `:white_check_mark: *Snyk daily scan* — no vulnerabilities found. ${link}`;
+            } else if (e.STATUS === "vulns") {
+              text = `:warning: *Snyk daily scan* — ${e.TOTAL} vulnerabilities found (${e.CRITICAL} critical, ${e.HIGH} high, ${e.MEDIUM} medium, ${e.LOW} low). Manual review needed. ${link}`;
+            } else {
+              const err = (e.SCAN_ERROR || "unknown error").replace(/[<>&]/g, " ");
+              text = `:x: *Snyk daily scan* — scan failed to run. Error: ${err} ${link}`;
+            }
+            process.stdout.write(JSON.stringify({ channel: e.SLACK_NOTIFY_CHANNEL, text, unfurl_links: false }));
+          ' > slack-payload.json
+          RESP=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data @slack-payload.json)
+          if [ "$(printf '%s' "$RESP" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).ok)}catch(e){console.log(false)}})')" != "true" ]; then
+            echo "::warning::Slack chat.postMessage failed: $(printf '%s' "$RESP" | head -c 300)"
+          fi
+
+      - name: Fail on high/critical findings or scan error
+        if: always()
+        env:
+          STATUS: ${{ steps.scan.outputs.status }}
+          SCAN_ERROR: ${{ steps.scan.outputs.error }}
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+          HIGH: ${{ steps.scan.outputs.high }}
+        run: |
+          if [ "$STATUS" != "clean" ] && [ "$STATUS" != "vulns" ]; then
+            echo "::error::Snyk scan failed to run: ${SCAN_ERROR:-unknown error}"
+            exit 1
+          fi
+          if [ "${CRITICAL:-0}" -gt 0 ] || [ "${HIGH:-0}" -gt 0 ]; then
+            echo "::error::Snyk found ${CRITICAL:-0} critical and ${HIGH:-0} high severity vulnerabilities. See the job summary."
+            exit 1
+          fi
+          echo "No high/critical vulnerabilities."
