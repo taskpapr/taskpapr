@@ -1,50 +1,39 @@
-name: Snyk
+name: Dependency audit
 
 # Daily dependency vulnerability scan (scan + notify only; no auto-fix PRs).
+# Uses `npm audit` against the lockfile (GitHub Advisory Database), so no
+# tokens are needed. Snyk monitoring runs separately via the Snyk GitHub
+# integration. Per-PR auditing is the `npm audit` step in ci.yml.
 #
-# Secrets:
-#   SNYK_TOKEN            required — Snyk API token (app.snyk.io → Account settings)
-#   SLACK_BOT_TOKEN       optional — xoxb- bot token with chat:write
-#   SLACK_NOTIFY_CHANNEL  optional — Slack channel ID to post results to
+# Secrets (both optional; Slack is skipped if either is unset):
+#   SLACK_BOT_TOKEN       xoxb- bot token with chat:write
+#   SLACK_NOTIFY_CHANNEL  Slack channel ID to post results to
 #
-# Slack is only posted to on scheduled / manual runs, never on PR/push runs.
-# The job fails (red run) on any high/critical finding or if the scan errors.
+# Slack is only posted to on scheduled / manual runs.
+# The job fails (red run) on any high/critical finding or if the audit errors.
 
 on:
   schedule:
     - cron: "0 7 * * *" # 07:00 UTC daily
   workflow_dispatch:
-  push:
-    branches: ["staging", "main"]
-    paths:
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/snyk.yml"
+  # Exercise the workflow itself when it changes.
   pull_request:
     branches: ["staging", "main"]
     paths:
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/snyk.yml"
+      - ".github/workflows/dependency-audit.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: snyk-${{ github.ref }}
+  group: dependency-audit-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  snyk:
-    name: Snyk dependency scan
+  audit:
+    name: Dependency audit
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Fork PRs don't receive repository secrets, so a scan there can only
-    # fail on the missing token. Skip them; the push to staging/main after
-    # merge (and the daily schedule) still covers the change.
-    if: >
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -59,63 +48,49 @@ jobs:
       # Never fails on its own: records status/counts as step outputs so the
       # summary and Slack steps can report every outcome, then the final
       # step decides whether the job goes red.
-      - name: Run snyk test
+      - name: Run npm audit
         id: scan
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-          SNYK_DISABLE_ANALYTICS: "1"
-          SNYK_VERSION: "1.1308.0"
         run: |
           set +e
-          if [ -z "$SNYK_TOKEN" ]; then
-            echo "::error::SNYK_TOKEN secret is not set. Create a token at https://app.snyk.io/account and add it with: gh secret set SNYK_TOKEN -R $GITHUB_REPOSITORY"
-            {
-              echo "status=error"
-              echo "error=SNYK_TOKEN secret is not configured for this repository"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          npm audit --package-lock-only --omit=dev --json > audit-results.json 2> audit-stderr.log
+          echo "npm audit exit code: $?"
 
-          npx --yes "snyk@${SNYK_VERSION}" test --severity-threshold=low --json \
-            > snyk-results.json 2> snyk-stderr.log
-          SNYK_EXIT=$?
-          echo "snyk exit code: $SNYK_EXIT"
-
-          SNYK_EXIT="$SNYK_EXIT" node -e '
+          node -e '
             const fs = require("fs");
             const out = (k, v) => fs.appendFileSync(process.env.GITHUB_OUTPUT, `${k}=${v}\n`);
             const oneLine = (s) => String(s || "").replace(/\s+/g, " ").trim().slice(0, 300);
-            const exit = Number(process.env.SNYK_EXIT);
             let r = null;
-            try { r = JSON.parse(fs.readFileSync("snyk-results.json", "utf8")); } catch (e) {}
-            if (Array.isArray(r)) r = { vulnerabilities: r.flatMap(p => p.vulnerabilities || []), error: r.map(p => p.error).filter(Boolean).join("; ") };
+            try { r = JSON.parse(fs.readFileSync("audit-results.json", "utf8")); } catch (e) {}
 
-            // Exit codes: 0 = clean, 1 = vulns found, 2 = failure, 3 = no supported projects.
-            if ((exit !== 0 && exit !== 1) || !r || r.error) {
-              let err = (r && r.error) || "";
-              if (!err) { try { err = fs.readFileSync("snyk-stderr.log", "utf8"); } catch (e) {} }
+            if (!r || r.error || !r.vulnerabilities) {
+              let err = (r && r.error && (r.error.summary || r.error.code)) || "";
+              if (!err) { try { err = fs.readFileSync("audit-stderr.log", "utf8"); } catch (e) {} }
               out("status", "error");
-              out("error", oneLine(err) || `snyk exited with code ${exit}`);
-              return;
+              out("error", oneLine(err) || "npm audit produced no usable output");
+              process.exit(0);
             }
 
-            // Snyk reports one entry per dependency path; count unique issues.
+            // npm reports one entry per vulnerable package; count unique
+            // advisories (the objects in each package `via` list).
             const seen = new Map();
-            for (const v of r.vulnerabilities || []) {
-              if (!seen.has(v.id)) seen.set(v.id, v);
+            for (const pkg of Object.values(r.vulnerabilities)) {
+              for (const v of pkg.via || []) {
+                if (typeof v !== "object" || seen.has(v.url)) continue;
+                seen.set(v.url, { ...v, fix: pkg.fixAvailable });
+              }
             }
             const issues = [...seen.values()];
-            const c = { critical: 0, high: 0, medium: 0, low: 0 };
+            const c = { critical: 0, high: 0, moderate: 0, low: 0 };
             for (const v of issues) if (v.severity in c) c[v.severity]++;
             out("status", issues.length ? "vulns" : "clean");
             out("total", issues.length);
             for (const [k, n] of Object.entries(c)) out(k, n);
 
-            const order = { critical: 0, high: 1, medium: 2, low: 3 };
+            const order = { critical: 0, high: 1, moderate: 2, low: 3, info: 4 };
             const md = issues
               .sort((a, b) => order[a.severity] - order[b.severity])
-              .map(v => `| ${v.severity} | \`${v.packageName}@${v.version}\` | [${oneLine(v.title).replace(/[|\[\]]/g, " ")}](https://security.snyk.io/vuln/${v.id}) | ${v.isUpgradable || v.isPatchable ? "yes" : "no"} |`);
-            fs.writeFileSync("snyk-issues.md", md.join("\n") + "\n");
+              .map(v => `| ${v.severity} | \`${v.name}@${v.range}\` | [${oneLine(v.title).replace(/[|\[\]]/g, " ")}](${v.url}) | ${v.fix ? "yes" : "no"} |`);
+            fs.writeFileSync("audit-issues.md", md.join("\n") + "\n");
           '
           exit 0
 
@@ -127,30 +102,30 @@ jobs:
           TOTAL: ${{ steps.scan.outputs.total }}
           CRITICAL: ${{ steps.scan.outputs.critical }}
           HIGH: ${{ steps.scan.outputs.high }}
-          MEDIUM: ${{ steps.scan.outputs.medium }}
+          MODERATE: ${{ steps.scan.outputs.moderate }}
           LOW: ${{ steps.scan.outputs.low }}
         run: |
           {
-            echo "## Snyk dependency scan"
+            echo "## Dependency audit"
             echo
             case "$STATUS" in
               clean)
                 echo ":white_check_mark: No vulnerabilities found." ;;
               vulns)
-                echo "**$TOTAL** unique vulnerabilities found."
+                echo "**$TOTAL** unique advisories found."
                 echo
                 echo "| Severity | Count |"
                 echo "|---|---|"
                 echo "| Critical | $CRITICAL |"
                 echo "| High | $HIGH |"
-                echo "| Medium | $MEDIUM |"
+                echo "| Moderate | $MODERATE |"
                 echo "| Low | $LOW |"
                 echo
-                echo "| Severity | Package | Issue | Fix available |"
+                echo "| Severity | Package (affected range) | Advisory | Fix available |"
                 echo "|---|---|---|---|"
-                cat snyk-issues.md 2>/dev/null ;;
+                cat audit-issues.md 2>/dev/null ;;
               *)
-                echo ":x: Scan failed to run."
+                echo ":x: Audit failed to run."
                 echo
                 echo '```'
                 echo "${SCAN_ERROR:-unknown error}"
@@ -169,7 +144,7 @@ jobs:
           TOTAL: ${{ steps.scan.outputs.total }}
           CRITICAL: ${{ steps.scan.outputs.critical }}
           HIGH: ${{ steps.scan.outputs.high }}
-          MEDIUM: ${{ steps.scan.outputs.medium }}
+          MODERATE: ${{ steps.scan.outputs.moderate }}
           LOW: ${{ steps.scan.outputs.low }}
         run: |
           if [ -z "$SLACK_BOT_TOKEN" ] || [ -z "$SLACK_NOTIFY_CHANNEL" ]; then
@@ -181,12 +156,12 @@ jobs:
             const link = `<${e.RUN_URL}|View run>`;
             let text;
             if (e.STATUS === "clean") {
-              text = `:white_check_mark: *Snyk daily scan* — no vulnerabilities found. ${link}`;
+              text = `:white_check_mark: *Dependency audit* — no vulnerabilities found. ${link}`;
             } else if (e.STATUS === "vulns") {
-              text = `:warning: *Snyk daily scan* — ${e.TOTAL} vulnerabilities found (${e.CRITICAL} critical, ${e.HIGH} high, ${e.MEDIUM} medium, ${e.LOW} low). Manual review needed. ${link}`;
+              text = `:warning: *Dependency audit* — ${e.TOTAL} advisories found (${e.CRITICAL} critical, ${e.HIGH} high, ${e.MODERATE} moderate, ${e.LOW} low). Manual review needed. ${link}`;
             } else {
               const err = (e.SCAN_ERROR || "unknown error").replace(/[<>&]/g, " ");
-              text = `:x: *Snyk daily scan* — scan failed to run. Error: ${err} ${link}`;
+              text = `:x: *Dependency audit* — audit failed to run. Error: ${err} ${link}`;
             }
             process.stdout.write(JSON.stringify({ channel: e.SLACK_NOTIFY_CHANNEL, text, unfurl_links: false }));
           ' > slack-payload.json
@@ -198,7 +173,7 @@ jobs:
             echo "::warning::Slack chat.postMessage failed: $(printf '%s' "$RESP" | head -c 300)"
           fi
 
-      - name: Fail on high/critical findings or scan error
+      - name: Fail on high/critical findings or audit error
         if: always()
         env:
           STATUS: ${{ steps.scan.outputs.status }}
@@ -207,11 +182,11 @@ jobs:
           HIGH: ${{ steps.scan.outputs.high }}
         run: |
           if [ "$STATUS" != "clean" ] && [ "$STATUS" != "vulns" ]; then
-            echo "::error::Snyk scan failed to run: ${SCAN_ERROR:-unknown error}"
+            echo "::error::npm audit failed to run: ${SCAN_ERROR:-unknown error}"
             exit 1
           fi
           if [ "${CRITICAL:-0}" -gt 0 ] || [ "${HIGH:-0}" -gt 0 ]; then
-            echo "::error::Snyk found ${CRITICAL:-0} critical and ${HIGH:-0} high severity vulnerabilities. See the job summary."
+            echo "::error::npm audit found ${CRITICAL:-0} critical and ${HIGH:-0} high severity advisories. See the job summary."
             exit 1
           fi
           echo "No high/critical vulnerabilities."
