@@ -23,3 +23,4 @@ docker-compose.yml
 # Private data 
 private_data/**
 
+.claude/**
