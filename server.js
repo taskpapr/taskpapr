@@ -2,6 +2,7 @@ require('dotenv').config({ quiet: true });
 require('express-async-errors');
 
 const express = require('express');
+const fs      = require('fs');
 const path    = require('path');
 const helmet  = require('helmet');
 
@@ -128,6 +129,29 @@ app.use('/js', express.static(path.join(__dirname, 'public', 'js')));
 // Brand icons — same reasoning as /js: /login and /pricing reference
 // /icons/mark.svg while logged out. Nothing under /icons is secret.
 app.use('/icons', express.static(path.join(__dirname, 'public', 'icons')));
+
+// PWA manifest + service worker — public for the same reason. Chrome fetches
+// the manifest without cookies, so behind requireAuth it would get a redirect
+// to /login and installation would fail silently. The icons the manifest
+// lists live under /icons, which is already public above. Neither file
+// contains user data.
+app.get('/manifest.webmanifest', (_req, res) => {
+  res.type('application/manifest+json');
+  res.sendFile(path.join(__dirname, 'public', 'manifest.webmanifest'));
+});
+
+// The worker is stamped with the app version so every deploy ships a
+// byte-different file. The browser then installs it, which swaps in a fresh
+// shell cache (see public/sw.js). no-cache makes the browser revalidate on
+// every check instead of trusting a heuristic HTTP cache lifetime.
+const swSource = fs
+  .readFileSync(path.join(__dirname, 'public', 'sw.js'), 'utf8')
+  .replaceAll('__TASKPAPR_VERSION__', require('./package.json').version);
+app.get('/sw.js', (_req, res) => {
+  res.type('application/javascript');
+  res.set('Cache-Control', 'no-cache');
+  res.send(swSource);
+});
 
 // Pricing pages — expired-trial users must reach /pricing
 app.get('/pricing', (req, res) => {
