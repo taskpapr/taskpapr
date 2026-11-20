@@ -23,3 +23,6 @@ docker-compose.yml
 # Private data 
 private_data/**
 
+
+# Mobile test screenshots (test/mobile.sh)
+test/mobile/screenshots/
