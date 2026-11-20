@@ -67,7 +67,7 @@ cleanup() {
     rsync -a -e "${SSH[*]}" "$HOST:$REMOTE_DIR/.mobile-shots/" "$SHOTS_DIR/" 2>/dev/null \
       && info "screenshots: $SHOTS_DIR"
     # Both throwaway servers (the sign-in-required one only exists briefly)
-    [[ $SERVER_STARTED == 1 ]] && r "kill \$(cat '$RUN_TMP'/*.pid) 2>/dev/null; sleep 1; rm -rf '$RUN_TMP'"
+    [[ $SERVER_STARTED == 1 ]] && r "kill \$(cat '$RUN_TMP'/*.pid) 2>/dev/null; sleep 1; kill -9 \$(cat '$RUN_TMP'/*.pid) 2>/dev/null; rm -rf '$RUN_TMP'"
     [[ $NET_OFF == 1 ]] && droid net on
     [[ $REVERSED == 1 ]] && droid unreverse "$PORT"
     [[ $EMULATOR_WAS_RUNNING == 0 ]] && droid stop >/dev/null
@@ -126,11 +126,23 @@ r "curl -fs localhost:$PORT/health >/dev/null" \
   && setup_fail "something is already listening on the host's port $PORT (MOBILE_PORT to change)"
 RUN_TMP=$(r "mktemp -d /tmp/taskpapr-mobile.XXXXXX")
 info "starting throwaway server (single-user, temp DB in $RUN_TMP)"
-r "cd ~/$REMOTE_DIR && SINGLE_USER_MODE=true PORT=$PORT DB_PATH=$RUN_TMP/test.db \
-   nohup node server.js > $RUN_TMP/server.log 2>&1 < /dev/null & echo \$! > $RUN_TMP/server.pid"
+# (Re)starts the server on the same temp DB; the offline checks stop and
+# restart it to simulate a deploy or crash.
+start_server() {
+  r "cd ~/$REMOTE_DIR && SINGLE_USER_MODE=true PORT=$PORT DB_PATH=$RUN_TMP/test.db \
+     nohup node server.js >> $RUN_TMP/server.log 2>&1 < /dev/null & echo \$! > $RUN_TMP/server.pid"
+  r "for i in \$(seq 1 30); do curl -fs localhost:$PORT/health >/dev/null && exit 0; sleep 1; done; exit 1" \
+    || { r "tail -20 $RUN_TMP/server.log" >&2; setup_fail "server did not become healthy"; }
+}
+# SIGKILL, not SIGTERM: server.js's graceful shutdown waits for open
+# connections, and the live-update (SSE) streams never close by themselves,
+# so a SIGTERM'd server keeps serving them while refusing new requests.
+stop_server() {
+  r "kill -9 \$(cat $RUN_TMP/server.pid) 2>/dev/null; for i in \$(seq 1 20); do curl -fs localhost:$PORT/health >/dev/null || exit 0; sleep 0.5; done; exit 1" \
+    || setup_fail "server did not stop"
+}
 SERVER_STARTED=1
-r "for i in \$(seq 1 30); do curl -fs localhost:$PORT/health >/dev/null && exit 0; sleep 1; done; exit 1" \
-  || { r "tail -20 $RUN_TMP/server.log" >&2; setup_fail "server did not become healthy"; }
+start_server
 
 curl -fs "http://localhost:$LOCAL_PORT/health" >/dev/null 2>&1 \
   && setup_fail "local port $LOCAL_PORT is busy (MOBILE_LOCAL_PORT to change)"
@@ -261,8 +273,19 @@ if [[ "$activity" =~ (WebappActivity|webapk) ]] \
 else shot not-standalone; fail "the installed app opened with browser UI ($activity)"; fi
 shot standalone
 
-# 4. Losing the connection while the board is open shows the offline note.
+# 4. The server going away while the network stays up (deploy, crash,
+#    sleeping instance) and the board sits idle: the dropped live-update
+#    stream must lead to the offline note, which clears once it's back.
 OFFLINE_NOTE="Offline · changes won't save"
+stop_server
+if droid wait-for "$OFFLINE_NOTE" 40; then ok "the server going away shows the offline note, with no user action"
+else shot no-note-server-gone; fail "no offline note after the server became unreachable"; fi
+start_server
+for _ in $(seq 1 30); do droid has "$OFFLINE_NOTE" || break; sleep 1; done
+droid has "$OFFLINE_NOTE" && { shot note-stuck-server-back; fail "the offline note stayed after the server came back"; }
+ok "the offline note clears once the server is reachable again"
+
+# Losing the network entirely while the board is open shows it too.
 droid net off; NET_OFF=1
 droid unreverse "$PORT"   # and make the server itself unreachable
 if droid wait-for "$OFFLINE_NOTE" 20; then ok "losing the connection shows '$OFFLINE_NOTE'"

@@ -281,6 +281,13 @@ async function api(method, path, body) {
   } catch (err) {
     // fetch() only rejects when the request never got an answer: no network,
     // or the server is unreachable. HTTP errors resolve and are handled below.
+    err.offline = true;
+    setConnection(false);
+    throw err;
+  }
+  if (isGatewayError(res.status)) {
+    const err = new Error(`taskpapr is unreachable (HTTP ${res.status})`);
+    err.offline = true;
     setConnection(false);
     throw err;
   }
@@ -3329,9 +3336,11 @@ async function pollForChanges() {
     }
     if (t === lastKnownModified) return; // nothing changed
     // Something changed on the server — do a full silent refresh
-    // (flashes the sync stamp to signal that remote changes arrived)
-    lastKnownModified = t;
+    // (flashes the sync stamp to signal that remote changes arrived).
+    // Record t only once the refresh succeeded, so a failed refresh is
+    // retried on the next poll instead of being forgotten.
     await refreshAllData();
+    lastKnownModified = t;
   } catch (_) {
     // Server unreachable — ignore silently, try again next tick
   }
@@ -3356,6 +3365,9 @@ let _sseRefreshTimer = null;
     _sseRefreshTimer = setTimeout(pollForChanges, 400);
   };
   es.onerror = () => {
+    // The stream dropping is often the first sign the server is gone while
+    // the board sits idle, so check whether taskpapr is still reachable.
+    probeConnection();
     // On persistent error, close and schedule a manual reconnect.
     // (EventSource auto-reconnects for transient failures; this handles
     // cases where the browser gives up after repeated failures.)
@@ -3863,6 +3875,12 @@ let offlineRetryTimer  = null;
 let boardLoaded        = false;   // init() has completed at least once
 let booting            = false;
 
+// 502/503/504 come from a proxy or load balancer when the app server itself
+// is down, restarting or asleep: as unreachable as no network at all.
+function isGatewayError(status) {
+  return status >= 502 && status <= 504;
+}
+
 function setConnection(online) {
   if (online !== isOffline) return;   // no change
   isOffline = !online;
@@ -3872,24 +3890,33 @@ function setConnection(online) {
   offlineRetryTimer = null;
   if (isOffline) {
     // /health is public and does no DB work, so a quiet 10s probe is cheap.
-    offlineRetryTimer = setInterval(checkConnection, 10_000);
+    // probeConnection() skips hidden tabs, so a backgrounded app stays idle.
+    offlineRetryTimer = setInterval(probeConnection, 10_000);
   } else {
     onReconnected();
   }
 }
 
-async function checkConnection() {
+async function probeConnection() {
+  if (document.visibilityState !== 'visible') return;
   try {
     const res = await fetch('/health', { cache: 'no-store' });
-    if (res.ok) setConnection(true);
-  } catch (_) { /* still unreachable */ }
+    setConnection(!isGatewayError(res.status));
+  } catch (_) {
+    setConnection(false);
+  }
 }
 
-function onReconnected() {
+async function onReconnected() {
   if (!boardLoaded) { if (!booting) boot(); return; }
   // Edits made elsewhere while we were offline: fetch everything, rather than
-  // relying on the last-modified comparison in pollForChanges().
-  refreshAllData().catch(() => {});
+  // relying on the last-modified comparison in pollForChanges(). Record the
+  // server's timestamp first so the next poll doesn't refresh a second time.
+  try {
+    const { t } = await get('/api/last-modified');
+    await refreshAllData();
+    lastKnownModified = t;
+  } catch (_) { /* the failed request has already updated the offline note */ }
 }
 
 async function refreshAllData() {
@@ -3916,7 +3943,10 @@ async function refreshAllData() {
 }
 
 window.addEventListener('offline', () => setConnection(false));
-window.addEventListener('online',  () => { if (isOffline) checkConnection(); });
+window.addEventListener('online',  () => { if (isOffline) probeConnection(); });
+document.addEventListener('visibilitychange', () => {
+  if (isOffline && document.visibilityState === 'visible') probeConnection();
+});
 
 // Shown in place of the board when it couldn't be loaded at all (e.g. the
 // installed app opened with no connection). An empty canvas would look like
@@ -3941,8 +3971,12 @@ async function boot() {
     boardLoaded = true;
     showBoardUnavailable(false);
   } catch (err) {
-    if (!isOffline) throw err;   // not a connectivity problem: surface it as before
-    showBoardUnavailable(true);  // setConnection(true) will call boot() again
+    if (!err.offline) throw err;   // not a connectivity problem: surface it as before
+    showBoardUnavailable(true);
+    // Make sure the retry probe is running even if another request reported
+    // a response in the meantime; reconnecting calls boot() again.
+    isOffline = false;
+    setConnection(false);
   } finally {
     booting = false;
   }

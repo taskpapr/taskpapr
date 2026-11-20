@@ -72,6 +72,11 @@ Chrome's first-run and promo screens are dismissed automatically.
 - `droid tap-text LABEL`: taps the first visible node with that label
 - `droid type TEXT` / `droid key 66`: types text and presses Enter
 - `droid shot`: through the `shot NAME` helper, saves a numbered screenshot
+- `droid long-press LABEL`, `droid top-activity`, `droid net on|off`,
+  `droid force-stop PKG`, `droid has-package PATTERN`: for app-level checks
+  (home-screen icons, standalone launch, offline)
+- `stop_server` / `start_server` (in `mobile.sh`): crash and restart the
+  throwaway server on the same database
 
 A label matches a node's visible text, its `content-desc` (accessible name)
 or an input's placeholder (`hint`). CSS `text-transform` is applied, so a
@@ -90,3 +95,13 @@ so the failure state is captured.
   `adb shell` swallows the rest of any script piped to the host over ssh.
 - Chrome keeps hidden copies of some inputs with zero-size bounds;
   `droid.sh` skips them.
+- Installing on `localhost` produces a Chrome **shortcut**, not a WebAPK
+  (Google only mints WebAPKs for real https origins). The shortcut still
+  launches standalone, but manifest `shortcuts` (long-press actions) only
+  exist on WebAPK installs, so that check is skipped here.
+- `adb reverse --remove` doesn't close connections that are already open,
+  and a SIGTERM'd taskpapr server keeps its SSE streams alive while refusing
+  new requests. To simulate the server going away, `stop_server` uses
+  SIGKILL.
+- Chrome's menu button is labelled "Customize and control Google Chrome",
+  or "Update available. More options" when Chrome has a pending update.
