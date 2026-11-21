@@ -2017,6 +2017,17 @@ button {
 }
 
 /* Today tile task rows */
+.today-task-unflag {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #b45309;
+  font-size: 12px;
+  padding: 0 2px;
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
 .today-task-row {
   display: flex;
   align-items: center;
@@ -2142,4 +2153,206 @@ button {
   font-style: italic;
   padding: 16px 8px;
   pointer-events: none;
+}
+/* ============================================================
+   Quick capture — one sheet for every entry point
+   ============================================================ */
+
+/* Sits near the top so the on-screen keyboard never covers it */
+.capture-overlay {
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+
+.capture-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+}
+
+.capture-input {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 16px;   /* ≥16px: mobile browsers don't zoom into the field */
+  font-family: var(--font-sans);
+  outline: none;
+  width: 100%;
+}
+
+.capture-input:focus { border-color: var(--accent); }
+
+.capture-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.capture-label {
+  font-size: 12px;
+  color: var(--ink-mid);
+  flex-shrink: 0;
+}
+
+.capture-tile {
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  font-size: 14px;
+  font-family: var(--font-sans);
+  color: var(--ink);
+}
+
+.capture-save {
+  background: var(--accent);
+  color: #fff;
+  padding: 9px 18px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.capture-save:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.capture-error {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--danger);
+}
+
+/* ============================================================
+   Phone Today screen — replaces the canvas on narrow screens
+   ============================================================ */
+
+.phone-today {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+body.phone-today-active .board-viewport,
+body.phone-today-active .zoom-indicator {
+  display: none;
+}
+
+.phone-today-heading {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  padding: 16px 16px 8px;
+  color: var(--ink);
+}
+
+.phone-today-count {
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--ink-faint);
+}
+
+.phone-today-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px;
+}
+
+.phone-today-list .today-task-row {
+  min-height: 52px;
+  padding: 8px 4px;
+  gap: 12px;
+  font-size: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.phone-today-list .today-task-row:hover { background: none; }
+
+/* Reordering is a mouse drag, so a phone keeps the order set on a wider
+   screen (touch reordering is not built yet) */
+.phone-today-list .today-drag-handle { display: none; }
+
+.phone-today-list .today-task-check {
+  width: 24px;
+  height: 24px;
+}
+
+.phone-today-list .today-task-tile-badge {
+  font-size: 12px;
+  max-width: 96px;
+}
+
+/* Enlarge the tile's compact ✕ into a thumb-sized tap target */
+.phone-today-list .today-task-unflag {
+  font-size: 16px;
+  padding: 10px 6px;
+}
+
+.phone-today-empty {
+  padding: 24px 4px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--ink-faint);
+}
+
+.phone-today-add {
+  margin: 12px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  padding: 14px;
+  font-size: 16px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+/* ============================================================
+   Phone header — fits a 360px-wide screen with nothing clipped
+   ============================================================ */
+
+@media (max-width: 600px) {
+  .app-header {
+    position: relative;
+    padding: 8px 10px;
+    gap: 8px;
+  }
+
+  /* The mark alone identifies the app; the version lives on wide screens */
+  .app-title__name,
+  .app-version { display: none; }
+
+  .app-title { min-width: 0; }
+
+  /* Board-wide controls stay on wide screens. On a phone, done tasks are
+     cleared per tile and goals are reached from the user menu. (+ Tile stays:
+     without a tile, nothing can be captured.) */
+  #btn-clear-all,
+  #btn-goals { display: none !important; }
+
+  .btn-ghost#btn-bookmarks { font-size: 0; padding: 6px 10px; }
+  .btn-ghost#btn-bookmarks::before { content: '🔖'; font-size: 16px; }
+
+  .header-actions { gap: 4px; flex-shrink: 0; }
+
+  .user-display-name { display: none; }
+
+  /* The offline note gets its own line under the controls instead of
+     pushing them off-screen; the header grows to make room. */
+  body.is-offline .app-header { padding-bottom: 24px; }
+
+  .offline-note {
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: 6px;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }

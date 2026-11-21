@@ -303,6 +303,9 @@ const del   = p      => api('DELETE', p);
 
 // ── Bootstrap ────────────────────────────────────────────────
 async function init() {
+  // Read the change stamp before the data, so anything changed while the
+  // board loads is still newer than it and gets picked up by the next check.
+  const { t: loadedStamp } = await get('/api/last-modified');
   const [columns, tasks, goals, user, bookmarks] = await Promise.all([
     get('/api/columns'),
     get('/api/tasks'),
@@ -315,6 +318,7 @@ async function init() {
   state.goals     = goals;
   state.user      = user;
   state.bookmarks = bookmarks;
+  lastKnownModified = loadedStamp;
 
   restoreViewState();
 
@@ -459,7 +463,10 @@ function syncTodayButton() {
   const flagged = state.tasks.filter(t => t.today_flag && t.status !== 'done').length;
   // Always visible — count badge shown when tasks are flagged, empty otherwise
   countEl.textContent = flagged > 0 ? flagged : '';
-  btn.classList.toggle('active', state.showTodayTile);
+  btn.classList.toggle('active', isPhone() ? phoneTodayShown() : state.showTodayTile);
+  // On a phone the button switches screens; say which one it leads to
+  if (isPhone()) btn.setAttribute('aria-label', phoneTodayShown() ? 'Show board' : 'Show Today');
+  else btn.removeAttribute('aria-label');
   // Note: we deliberately do NOT auto-close the tile when flagged === 0 here.
   // If the user explicitly opened it and there are no tasks, the empty state
   // message is the honest, correct response (Design Tenet 5).
@@ -515,6 +522,7 @@ function renderBoard() {
   syncTodayButton();
   renderHiddenTileButton();
   if (state.showTodayTile) renderTodayTile();
+  renderPhoneToday();
 }
 
 // ── Goal smart-tiles ─────────────────────────────────────────
@@ -2592,10 +2600,14 @@ function bindGlobalEvents() {
       return;
     }
 
-    const tag = document.activeElement.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement.contentEditable === 'true') return;
+    const captureOpen = !document.getElementById('capture-modal').classList.contains('hidden');
+    if (captureOpen && e.key === 'Escape') { closeCapture(); return; }
 
-    if (e.key === 'd' || e.key === 'D') { toggleTodayTile(); }
+    const tag = document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || document.activeElement.contentEditable === 'true') return;
+    if (captureOpen) return;   // no view switching behind the open sheet
+
+    if (e.key === 'd' || e.key === 'D') { onTodayButton(); }
     if (e.key === 'g' || e.key === 'G') { if (state.goals.length > 0) toggleGoalTiles(); }
     if (e.key === 'Escape') {
       hideAllMenus();
@@ -3234,11 +3246,12 @@ document.getElementById('btn-find-on-board').addEventListener('click', () => {
 // Close button
 document.getElementById('notes-panel-close').addEventListener('click', closeNotesPanel);
 
-// ── Wake-on-visibility (handles laptop lid open / tab switch back) ────────
-// When the browser tab becomes visible after being hidden for more than
-// STALE_THRESHOLD ms, silently re-fetch state from the server and re-render.
-// This handles the common case of opening the laptop in the morning and
-// finding the board showing yesterday's dormant/urgency state.
+// ── Wake-on-visibility (laptop lid open, tab switch, phone app switch) ──────
+// Whenever the page becomes visible again, catch up on what changed while it
+// was hidden: the live-update stream is dropped or ignored meanwhile (see
+// "Change checks" below). After more than STALE_THRESHOLD ms it re-fetches
+// and re-renders everything instead, since time-based state (urgency,
+// dormancy) has moved on too, e.g. opening the laptop in the morning.
 
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 let hiddenAt = null;
@@ -3254,32 +3267,29 @@ document.addEventListener('visibilitychange', async () => {
   const elapsed = Date.now() - hiddenAt;
   hiddenAt = null;
 
-  if (elapsed < STALE_THRESHOLD_MS) return; // short switch — no need to refresh
+  if (!boardLoaded) return;
 
-  // Silent background refresh — don't disrupt the user if the panel is open
+  if (elapsed < STALE_THRESHOLD_MS) {
+    // Short absence (an app switch on a phone): catch up on anything that
+    // changed meanwhile. The live-update stream may have been dropped while
+    // hidden, so don't wait up to 5 minutes for the safety-net poll (tenet 5).
+    scheduleCatchUp();
+    return;
+  }
+
+  // Long absence: re-render everything, since time-based state (urgency,
+  // dormancy) has moved on even if no data changed. Silent: doesn't disrupt
+  // an open panel. Failures surface through the offline note.
   try {
-    const [columns, tasks, goals, user, bookmarks] = await Promise.all([
-      get('/api/columns'),
-      get('/api/tasks'),
-      get('/api/goals'),
-      get('/api/me'),
-      get('/api/bookmarks'),
-    ]);
-    state.columns   = columns;
-    state.tasks     = tasks;
-    state.goals     = goals;
-    state.user      = user;
-    state.bookmarks = bookmarks;
-    renderUser();
-    renderDebugPill();
-    renderHiddenTileButton();
-    updateGoalsButton();
-    renderBoard();
-    renderBookmarkList();
+    await refreshEverything();
   } catch (err) {
-    // Server may be unreachable (e.g. laptop woke on a different network) — ignore silently
     console.warn('[taskpapr] visibility refresh failed:', err.message);
   }
+});
+
+// Back from the back/forward cache: the page was frozen, not reloaded.
+window.addEventListener('pageshow', e => {
+  if (e.persisted && boardLoaded) scheduleCatchUp();
 });
 
 // ── Sync timestamp display ────────────────────────────────────
@@ -3317,24 +3327,79 @@ function startSyncStampTicker() {
   _syncStampTimer = setInterval(() => updateSyncStamp(false), 30_000);
 }
 
-// ── 60-second cross-device polling ────────────────────────────
-// Polls /api/last-modified every 60s when the tab is active and visible.
-// Only does a full re-fetch if the server timestamp has advanced.
-// This covers the case of editing on one device and viewing on another
-// without needing to manually refresh.
-let lastKnownModified = null;
+// ── Change checks ─────────────────────────────────────────────
+// pollForChanges() asks /api/last-modified whether anything changed since
+// the board last loaded, and re-fetches only if so. It runs:
+//   - after every live-update (SSE) event, coalesced
+//   - when the live-update stream (re)opens, and when the page becomes
+//     visible again or returns from the back/forward cache: a phone drops
+//     the stream while the app is in the background, so this catches up on
+//     whatever was missed (scheduleCatchUp)
+//   - every 5 minutes as a safety net (missed events, buffering proxies)
+// There is no faster timer: SSE plus these catch-ups keep it current.
+let lastKnownModified = null;   // set by init() from the stamp read before loading
 
-async function pollForChanges() {
-  if (document.visibilityState !== 'visible') return;
+// Only one sync runs at a time, so a resume that fires both visibilitychange
+// and the stream reopening can't start two refreshes. A change check asked
+// for while a sync is running is remembered and run once afterwards: the
+// running sync may have read the stamp before that change landed. Checks
+// only re-fetch when the stamp moved, so this never refreshes twice for the
+// same change.
+let _syncInFlight = null;
+let _checkAgain   = false;
+function syncOnce(fn) {
+  if (!_syncInFlight) {
+    _syncInFlight = (async () => {
+      try {
+        let failure = null;
+        try { await fn(); } catch (err) { failure = err; }
+        // checkForChanges never throws, so a queued check always runs
+        while (_checkAgain) { _checkAgain = false; await checkForChanges(); }
+        if (failure) throw failure;
+      } finally { _syncInFlight = null; }
+    })();
+  }
+  return _syncInFlight;
+}
+
+// Re-fetch everything and record the change stamp it reflects.
+async function fullRefresh() {
+  const { t } = await get('/api/last-modified');
+  await refreshAllData();
+  lastKnownModified = t;
+}
+
+// A full refresh that must happen (reconnecting, a long absence). If a
+// change check is already running this joins it, and only when that check
+// found nothing new does the full refresh still run: it also re-renders
+// time-based state and catches deletions, which the change stamp doesn't
+// reflect. Either way the board is refreshed exactly once.
+async function refreshEverything() {
+  const before = lastSyncedAt;
+  await syncOnce(fullRefresh);
+  if (lastSyncedAt === before) await syncOnce(fullRefresh);
+}
+
+// Debounced: several resume signals within a moment lead to one check.
+let _catchUpTimer = null;
+function scheduleCatchUp() {
+  clearTimeout(_catchUpTimer);
+  _catchUpTimer = setTimeout(pollForChanges, 250);
+}
+
+// Called from timers and event handlers, so it never rejects: a joined sync
+// that fails has already reported through the offline note.
+function pollForChanges() {
+  if (_syncInFlight) _checkAgain = true;
+  return (_syncInFlight || syncOnce(checkForChanges)).catch(() => {});
+}
+
+async function checkForChanges() {
+  if (document.visibilityState !== 'visible' || !boardLoaded) return;
   try {
     const { t } = await get('/api/last-modified');
     if (t === null) return; // no data yet
-    if (lastKnownModified === null) {
-      // First poll — just record the current timestamp, don't re-render
-      lastKnownModified = t;
-      return;
-    }
-    if (t === lastKnownModified) return; // nothing changed
+    if (t === lastKnownModified) return; // nothing changed (null at load = the board was empty)
     // Something changed on the server — do a full silent refresh
     // (flashes the sync stamp to signal that remote changes arrived).
     // Record t only once the refresh succeeded, so a failed refresh is
@@ -3357,8 +3422,16 @@ async function pollForChanges() {
 // five endpoints per event.
 let _sseRefreshTimer = null;
 
+let _sseOpenedBefore = false;
+
 (function startSse() {
   const es = new EventSource('/api/events');
+  es.onopen = () => {
+    // The first open is part of page load, which fetches everything anyway.
+    // Any later open is a reconnect: events may have been missed meanwhile.
+    if (!_sseOpenedBefore) { _sseOpenedBefore = true; return; }
+    scheduleCatchUp();
+  };
   es.onmessage = (e) => {
     if (e.data !== 'change') return;
     clearTimeout(_sseRefreshTimer);
@@ -3582,10 +3655,10 @@ function removeTodayTile() {
   if (existing) existing.remove();
 }
 
-function renderTodayTile() {
-  removeTodayTile();
-
-  const tasks = state.tasks
+// Today's not-done tasks, in Today order. Shared by the floating Today tile
+// and the phone Today screen so the two can never disagree (tenet 5).
+function todayTasksSorted() {
+  return state.tasks
     .filter(t => t.today_flag && t.status !== 'done')
     .sort((a, b) => {
       // today_order first, then position within tile
@@ -3593,6 +3666,85 @@ function renderTodayTile() {
       const ob = b.today_order != null ? b.today_order : 9999;
       return oa - ob || a.position - b.position;
     });
+}
+
+// One Today row: drag handle, checkbox, title, tile badge, unflag button.
+// Used by the Today tile and the phone Today screen.
+function buildTodayTaskRow(task, idx) {
+  const col = state.columns.find(c => c.id === task.column_id);
+  const row = document.createElement('div');
+  row.className = 'today-task-row';
+  row.dataset.taskId = task.id;
+  row.dataset.todayIdx = idx;
+
+  // Drag handle
+  const handle = document.createElement('span');
+  handle.className = 'today-drag-handle';
+  handle.textContent = '⠿';
+  handle.title = 'Drag to reorder';
+  row.appendChild(handle);
+
+  // Checkbox
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.className = 'today-task-check';
+  check.checked = false;
+  check.title = 'Mark done';
+  check.setAttribute('aria-label', `Mark done: ${task.title}`);
+  check.addEventListener('change', async e => {
+    e.stopPropagation();
+    try {
+      await toggleDone(task.id, true);
+    } catch (err) {
+      // Never leave a ticked box for a task that didn't save (tenet 15)
+      check.checked = false;
+      showToast(err.offline ? "Offline: that wasn't saved" : "Couldn't mark that done. Try again.");
+    }
+  });
+  check.addEventListener('mousedown', e => e.stopPropagation());
+  row.appendChild(check);
+
+  // Title
+  const titleSpan = document.createElement('span');
+  titleSpan.className = 'today-task-title';
+  titleSpan.textContent = task.title;
+  titleSpan.title = task.title;
+  titleSpan.addEventListener('click', () => openNotesPanel(task.id));
+  row.appendChild(titleSpan);
+
+  // Tile badge
+  if (col) {
+    const badge = document.createElement('span');
+    badge.className = 'today-task-tile-badge';
+    badge.textContent = col.name;
+    badge.title = col.name;
+    row.appendChild(badge);
+  }
+
+  // Unflag button (amber strip click)
+  const unflag = document.createElement('button');
+  unflag.className = 'today-task-unflag';
+  unflag.textContent = '✕';
+  unflag.title = 'Remove from Today';
+  unflag.setAttribute('aria-label', `Remove from Today: ${task.title}`);
+  unflag.addEventListener('click', async e => {
+    e.stopPropagation();
+    try {
+      await toggleTodayFlag(task.id, false);
+    } catch (err) {
+      showToast(err.offline ? "Offline: that wasn't saved" : "Couldn't remove that from Today. Try again.");
+    }
+  });
+  unflag.addEventListener('mousedown', e => e.stopPropagation());
+  row.appendChild(unflag);
+
+  return row;
+}
+
+function renderTodayTile() {
+  removeTodayTile();
+
+  const tasks = todayTasksSorted();
 
   const tile = document.createElement('div');
   tile.id = 'today-tile';
@@ -3629,64 +3781,7 @@ function renderTodayTile() {
     empty.textContent = 'No tasks flagged for today';
     body.appendChild(empty);
   } else {
-    tasks.forEach((task, idx) => {
-      const col = state.columns.find(c => c.id === task.column_id);
-      const row = document.createElement('div');
-      row.className = 'today-task-row';
-      row.dataset.taskId = task.id;
-      row.dataset.todayIdx = idx;
-
-      // Drag handle
-      const handle = document.createElement('span');
-      handle.className = 'today-drag-handle';
-      handle.textContent = '⠿';
-      handle.title = 'Drag to reorder';
-      row.appendChild(handle);
-
-      // Checkbox
-      const check = document.createElement('input');
-      check.type = 'checkbox';
-      check.className = 'today-task-check';
-      check.checked = false;
-      check.title = 'Mark done';
-      check.addEventListener('change', async e => {
-        e.stopPropagation();
-        await toggleDone(task.id, true);
-      });
-      check.addEventListener('mousedown', e => e.stopPropagation());
-      row.appendChild(check);
-
-      // Title
-      const titleSpan = document.createElement('span');
-      titleSpan.className = 'today-task-title';
-      titleSpan.textContent = task.title;
-      titleSpan.title = task.title;
-      titleSpan.addEventListener('click', () => openNotesPanel(task.id));
-      row.appendChild(titleSpan);
-
-      // Tile badge
-      if (col) {
-        const badge = document.createElement('span');
-        badge.className = 'today-task-tile-badge';
-        badge.textContent = col.name;
-        badge.title = col.name;
-        row.appendChild(badge);
-      }
-
-      // Unflag button (amber strip click)
-      const unflag = document.createElement('button');
-      unflag.style.cssText = 'background:none;border:none;cursor:pointer;color:#b45309;font-size:12px;padding:0 2px;flex-shrink:0;opacity:0.5;';
-      unflag.textContent = '✕';
-      unflag.title = 'Remove from Today';
-      unflag.addEventListener('click', async e => {
-        e.stopPropagation();
-        await toggleTodayFlag(task.id, false);
-      });
-      unflag.addEventListener('mousedown', e => e.stopPropagation());
-      row.appendChild(unflag);
-
-      body.appendChild(row);
-    });
+    tasks.forEach((task, idx) => body.appendChild(buildTodayTaskRow(task, idx)));
 
     // Simple drag-to-reorder within Today tile
     setupTodayDragReorder(body);
@@ -3861,8 +3956,182 @@ document.getElementById('context-menu').addEventListener('click', async e => {
 // Wire Today header button
 (function() {
   const btn = document.getElementById('btn-today');
-  if (btn) btn.addEventListener('click', () => toggleTodayTile());
+  if (btn) btn.addEventListener('click', () => onTodayButton());
 })();
+
+// ── Phone: Today screen ───────────────────────────────────────
+// On a narrow screen the canvas is the wrong tool for the two things a phone
+// is for: glancing at / ticking off Today, and capturing a task. So phones
+// open to a full-screen Today list (the same tasks, in the same order, as the
+// Today tile), and the 📅 button toggles between it and the canvas. Wide
+// screens are untouched: there, 📅 still toggles the floating Today tile
+// (DESIGN.md tenets 1, 3, 10).
+const phoneMQ = window.matchMedia('(max-width: 600px)');
+let phoneView = phoneMQ.matches ? 'today' : 'board';   // 'today' | 'board' (phones only)
+
+function isPhone() { return phoneMQ.matches; }
+function phoneTodayShown() { return isPhone() && phoneView === 'today'; }
+
+function onTodayButton() {
+  if (!isPhone()) { toggleTodayTile(); return; }
+  setPhoneView(phoneView === 'today' ? 'board' : 'today');
+}
+
+function setPhoneView(v) {
+  phoneView = v;
+  renderPhoneToday();
+  syncTodayButton();
+  // The canvas was hidden while the Today screen showed: re-check which
+  // tiles are on screen now that it has a size again.
+  if (!phoneTodayShown()) updateOffscreenIndicators();
+}
+
+function renderPhoneToday() {
+  const screen = document.getElementById('phone-today');
+  if (!screen) return;
+  const show = phoneTodayShown();
+  screen.classList.toggle('hidden', !show);
+  document.body.classList.toggle('phone-today-active', show);
+  if (!show) return;
+
+  const tasks = todayTasksSorted();
+  document.getElementById('phone-today-count').textContent = tasks.length ? `(${tasks.length})` : '';
+  const list = document.getElementById('phone-today-list');
+  const scrollTop = list.scrollTop;   // refreshes (SSE, polls) must not lose the user's place
+  list.innerHTML = '';
+  if (tasks.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'phone-today-empty';
+    empty.textContent = 'Nothing flagged for Today.';
+    list.appendChild(empty);
+    return;
+  }
+  tasks.forEach((task, idx) => list.appendChild(buildTodayTaskRow(task, idx)));
+  list.scrollTop = scrollTop;
+}
+
+phoneMQ.addEventListener('change', () => {
+  // Rotating or resizing across the breakpoint keeps whichever screen the
+  // user last chose; only a fresh load starts on Today. The floating tile
+  // isn't used on a phone.
+  if (isPhone() && state.showTodayTile) { state.showTodayTile = false; removeTodayTile(); }
+  setPhoneView(phoneView);
+});
+
+// ── Quick capture ─────────────────────────────────────────────
+// One capture screen for every entry point: the Today screen's "+ Add task",
+// the app icon's "Add task" shortcut (/?capture=1), and later the share
+// target and the home-screen widget. A single field plus a tile picker that
+// remembers the last tile used on this device.
+const CAPTURE_TILE_KEY = 'taskpapr.captureTileId';
+
+function captureTiles() {
+  return state.columns.filter(c => !c.hidden);
+}
+
+function rememberedCaptureTileId() {
+  try { return parseInt(localStorage.getItem(CAPTURE_TILE_KEY), 10) || null; }
+  catch (_) { return null; }   // storage blocked: fall back to the first tile
+}
+
+function openCapture(prefill = '') {
+  const modal  = document.getElementById('capture-modal');
+  const input  = document.getElementById('capture-input');
+  const select = document.getElementById('capture-tile');
+  const tiles  = captureTiles();
+
+  select.innerHTML = '';
+  tiles.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = c.name;
+    select.appendChild(opt);
+  });
+  const remembered = rememberedCaptureTileId();
+  if (remembered && tiles.some(c => c.id === remembered)) select.value = String(remembered);
+
+  setCaptureError(tiles.length ? '' : 'Add a tile on the board first: tasks live in tiles.');
+  document.getElementById('capture-save').disabled = tiles.length === 0;
+  input.value = prefill;
+  modal.classList.remove('hidden');
+  input.focus();
+}
+
+function closeCapture() {
+  document.getElementById('capture-modal').classList.add('hidden');
+  setCaptureError('');
+}
+
+function setCaptureError(msg) {
+  const el = document.getElementById('capture-error');
+  el.textContent = msg;
+  el.classList.toggle('hidden', !msg);
+}
+
+// The server's reason for a rejected request (e.g. a limit), from api()'s
+// error, which carries the response body.
+function apiErrorReason(err) {
+  try {
+    const body = JSON.parse(err.message);
+    if (body && typeof body.error === 'string' && body.error) return body.error;
+  } catch (_) { /* not JSON */ }
+  return 'the server refused it. Your text is still here; try again.';
+}
+
+async function submitCapture() {
+  const input  = document.getElementById('capture-input');
+  const select = document.getElementById('capture-tile');
+  const save   = document.getElementById('capture-save');
+  const title  = input.value.trim();
+  const colId  = parseInt(select.value, 10);
+  if (!title || !colId || save.disabled) return;
+
+  save.disabled = true;
+  setCaptureError('');
+  try {
+    const task = await post('/api/tasks', { title, column_id: colId });
+    state.tasks.push(task);
+    try { localStorage.setItem(CAPTURE_TILE_KEY, String(colId)); } catch (_) { /* not remembered: harmless */ }
+    renderBoard();
+    closeCapture();
+    const col = state.columns.find(c => c.id === colId);
+    showToast(`Added to ${col ? col.name : 'the board'}`);
+  } catch (err) {
+    // Keep the sheet open with the text intact, and say why (tenet 15)
+    setCaptureError(err.offline
+      ? "Offline: not saved. Your text is still here; try again when you're back online."
+      : `Couldn't save that task: ${apiErrorReason(err)}`);
+  } finally {
+    save.disabled = captureTiles().length === 0;
+  }
+}
+
+(function bindCapture() {
+  document.getElementById('capture-form').addEventListener('submit', e => {
+    e.preventDefault();
+    submitCapture();
+  });
+  document.getElementById('capture-close').addEventListener('click', closeCapture);
+  document.getElementById('capture-modal').addEventListener('click', e => {
+    if (e.target.id === 'capture-modal') closeCapture();   // tap outside the panel
+  });
+  document.getElementById('capture-input').addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeCapture();
+  });
+  document.getElementById('phone-today-add').addEventListener('click', () => openCapture());
+})();
+
+// /?capture=1 (the app icon's "Add task" shortcut) opens capture once the
+// board has loaded. The parameter is removed afterwards so a reload doesn't
+// reopen it; if the board can't load yet, it stays for the reconnect boot.
+function handleCaptureParam() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('capture') !== '1') return;
+  params.delete('capture');
+  const qs = params.toString();
+  history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : '') + location.hash);
+  openCapture();
+}
 
 // ── Connection state: the offline note ──────────────────────
 // A quiet header line ("Offline · changes won't save") whenever taskpapr
@@ -3886,6 +4155,7 @@ function setConnection(online) {
   isOffline = !online;
   const note = document.getElementById('offline-note');
   if (note) note.classList.toggle('hidden', online);
+  document.body.classList.toggle('is-offline', isOffline);   // phone header makes room for the note
   clearInterval(offlineRetryTimer);
   offlineRetryTimer = null;
   if (isOffline) {
@@ -3913,9 +4183,7 @@ async function onReconnected() {
   // relying on the last-modified comparison in pollForChanges(). Record the
   // server's timestamp first so the next poll doesn't refresh a second time.
   try {
-    const { t } = await get('/api/last-modified');
-    await refreshAllData();
-    lastKnownModified = t;
+    await refreshEverything();   // joins a running check without refreshing twice
   } catch (_) { /* the failed request has already updated the offline note */ }
 }
 
@@ -3970,6 +4238,7 @@ async function boot() {
     await init();
     boardLoaded = true;
     showBoardUnavailable(false);
+    handleCaptureParam();
   } catch (err) {
     if (!err.offline) throw err;   // not a connectivity problem: surface it as before
     showBoardUnavailable(true);

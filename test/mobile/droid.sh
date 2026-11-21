@@ -23,12 +23,18 @@
 #   top-activity         print the component of the foreground activity
 #   has-package PATTERN  exit 0 if an installed package name matches PATTERN (ERE)
 #   force-stop PKG       force-stop an app (e.g. com.android.chrome)
+#   resume PKG           bring an app's existing task to the front, without
+#                        navigating (as tapping its launcher icon would)
 #   net on|off           turn the emulator's wifi and mobile data on or off
+#   rotate portrait|landscape  fix the screen orientation (auto-rotate off)
 #   dismiss-popups       tap through Chrome first-run / promo dialogs
+#   eval PREFIX JS       evaluate JS in the Chrome page whose URL starts with PREFIX
+#                        (DevTools protocol; prints the result)
 #
 # Environment:
 #   ANDROID_HOME   SDK location (default: ~/Library/Android/sdk)
 #   MOBILE_AVD     AVD name (default: taskpapr_pixel)
+#   MOBILE_CDP_PORT  host port for the DevTools forward used by `eval` (default: 9333)
 #
 # Gotchas baked in:
 #   - every adb call reads </dev/null, otherwise `adb shell` swallows the stdin
@@ -140,12 +146,34 @@ case "$cmd" in
       | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.$]+' | head -1 ;;
   has-package) a shell pm list packages | grep -qE "$1" ;;
   force-stop)  a shell am force-stop "$1" ;;
+  resume)
+    # Launcher intent on the app's main activity: Android brings the existing
+    # task to the front ("Activity not started, its current task has been
+    # brought to the front") instead of opening anything new. Only Chrome's
+    # launcher activity is known here.
+    [[ "$1" == com.android.chrome ]] || die "resume: only com.android.chrome is supported"
+    a shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
+      -n com.android.chrome/com.google.android.apps.chrome.Main >/dev/null 2>&1 ;;
   net)
     case "${1:-}" in
       on)  a shell svc wifi enable;  a shell svc data enable ;;
       off) a shell svc wifi disable; a shell svc data disable ;;
       *)   die "usage: net on|off" ;;
     esac ;;
+  eval)
+    cdp_port="${MOBILE_CDP_PORT:-9333}"
+    a forward "tcp:$cdp_port" localabstract:chrome_devtools_remote >/dev/null || die "adb forward for DevTools failed"
+    node "$(dirname "$0")/cdp-eval.js" "$cdp_port" "$1" "$2"; rc=$?
+    a forward --remove "tcp:$cdp_port" >/dev/null 2>&1
+    exit $rc ;;
+  rotate)
+    case "${1:-}" in
+      portrait)  r=0 ;;
+      landscape) r=1 ;;
+      *) die "usage: rotate portrait|landscape" ;;
+    esac
+    a shell settings put system accelerometer_rotation 0
+    a shell settings put system user_rotation "$r" ;;
   dismiss-popups)
     # Chrome first-run, sign-in and promo screens. Loop until none are found.
     for _ in 1 2 3 4 5 6; do
