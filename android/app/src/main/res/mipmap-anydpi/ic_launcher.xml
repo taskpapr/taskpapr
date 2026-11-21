@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon built from the PWA's maskable icon (public/icons/maskable_512.png,
+  copied to drawable-nodpi/ic_launcher_mark.png). A maskable icon keeps its mark
+  inside a circle 80% of its width; an adaptive icon only guarantees the middle
+  66.7% is visible, so the image is inset by 8.3% a side to land the safe zone
+  inside the visible area.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/icon_background" />
+    <foreground>
+        <inset
+            android:drawable="@drawable/ic_launcher_mark"
+            android:inset="8.3%" />
+    </foreground>
+</adaptive-icon>
