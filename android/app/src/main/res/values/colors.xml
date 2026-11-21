@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- theme_color / background_color from public/manifest.webmanifest -->
+    <color name="brand_background">#F5F0E8</color>
+    <!-- Background of public/icons/maskable_*.png (scripts/generate-pwa-icons.js) -->
+    <color name="icon_background">#F7F6F3</color>
+</resources>
