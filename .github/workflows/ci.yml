@@ -43,6 +43,20 @@ jobs:
           fi
           echo "Version bumped: $BASE_VERSION -> $HEAD_VERSION"
 
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ShellCheck is preinstalled on ubuntu-latest runners, so no action is
+      # needed. --severity=warning fails on warnings and errors only: info/
+      # style notes (e.g. SC2015) stay visible locally but can't break CI when
+      # the runner's shellcheck version is updated and gains new checks.
+      # Lints every tracked *.sh file; nothing is excluded.
+      - name: Lint shell scripts
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+
   smoke-test:
     name: Smoke test
     runs-on: ubuntu-latest
