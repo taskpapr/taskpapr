@@ -96,6 +96,33 @@ body {
   opacity: 1;
 }
 
+/* Offline note: quiet, static text next to the sync stamp (tenet 6). Muted
+   red so it reads as "not saving" without shouting. */
+.offline-note {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 400;
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+  color: var(--danger);
+  opacity: 0.8;
+  white-space: nowrap;
+}
+.offline-note.hidden { display: none; }
+
+/* Shown instead of an empty canvas when the board couldn't load at all */
+.board-unavailable {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 280px;
+  text-align: center;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-faint);
+}
+
 .header-actions {
   display: flex;
   gap: 6px;

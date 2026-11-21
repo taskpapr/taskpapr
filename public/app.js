@@ -275,7 +275,23 @@ function bindBeaconEvents() {
 async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(path, opts);
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (err) {
+    // fetch() only rejects when the request never got an answer: no network,
+    // or the server is unreachable. HTTP errors resolve and are handled below.
+    err.offline = true;
+    setConnection(false);
+    throw err;
+  }
+  if (isGatewayError(res.status)) {
+    const err = new Error(`taskpapr is unreachable (HTTP ${res.status})`);
+    err.offline = true;
+    setConnection(false);
+    throw err;
+  }
+  setConnection(true);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -3320,27 +3336,11 @@ async function pollForChanges() {
     }
     if (t === lastKnownModified) return; // nothing changed
     // Something changed on the server — do a full silent refresh
+    // (flashes the sync stamp to signal that remote changes arrived).
+    // Record t only once the refresh succeeded, so a failed refresh is
+    // retried on the next poll instead of being forgotten.
+    await refreshAllData();
     lastKnownModified = t;
-    const [columns, tasks, goals, user, bookmarks] = await Promise.all([
-      get('/api/columns'),
-      get('/api/tasks'),
-      get('/api/goals'),
-      get('/api/me'),
-      get('/api/bookmarks'),
-    ]);
-    state.columns   = columns;
-    state.tasks     = tasks;
-    state.goals     = goals;
-    state.user      = user;
-    state.bookmarks = bookmarks;
-    renderUser();
-    renderDebugPill();
-    renderHiddenTileButton();
-    updateGoalsButton();
-    renderBoard();
-    renderBookmarkList();
-    lastSyncedAt = Date.now();
-    updateSyncStamp(true); // flash "updated" to signal remote changes arrived
   } catch (_) {
     // Server unreachable — ignore silently, try again next tick
   }
@@ -3365,6 +3365,9 @@ let _sseRefreshTimer = null;
     _sseRefreshTimer = setTimeout(pollForChanges, 400);
   };
   es.onerror = () => {
+    // The stream dropping is often the first sign the server is gone while
+    // the board sits idle, so check whether taskpapr is still reachable.
+    probeConnection();
     // On persistent error, close and schedule a manual reconnect.
     // (EventSource auto-reconnects for transient failures; this handles
     // cases where the browser gives up after repeated failures.)
@@ -3861,5 +3864,131 @@ document.getElementById('context-menu').addEventListener('click', async e => {
   if (btn) btn.addEventListener('click', () => toggleTodayTile());
 })();
 
+// ── Connection state: the offline note ──────────────────────
+// A quiet header line ("Offline · changes won't save") whenever taskpapr
+// can't be reached, so the user never has to wonder whether an edit landed
+// (DESIGN.md tenets 6 and 15). It's set by network-level fetch failures and
+// the browser's offline event, and cleared only once a request actually gets
+// through: the browser's online event is a hint, not proof.
+let isOffline          = false;
+let offlineRetryTimer  = null;
+let boardLoaded        = false;   // init() has completed at least once
+let booting            = false;
+
+// 502/503/504 come from a proxy or load balancer when the app server itself
+// is down, restarting or asleep: as unreachable as no network at all.
+function isGatewayError(status) {
+  return status >= 502 && status <= 504;
+}
+
+function setConnection(online) {
+  if (online !== isOffline) return;   // no change
+  isOffline = !online;
+  const note = document.getElementById('offline-note');
+  if (note) note.classList.toggle('hidden', online);
+  clearInterval(offlineRetryTimer);
+  offlineRetryTimer = null;
+  if (isOffline) {
+    // /health is public and does no DB work, so a quiet 10s probe is cheap.
+    // probeConnection() skips hidden tabs, so a backgrounded app stays idle.
+    offlineRetryTimer = setInterval(probeConnection, 10_000);
+  } else {
+    onReconnected();
+  }
+}
+
+async function probeConnection() {
+  if (document.visibilityState !== 'visible') return;
+  try {
+    const res = await fetch('/health', { cache: 'no-store' });
+    setConnection(!isGatewayError(res.status));
+  } catch (_) {
+    setConnection(false);
+  }
+}
+
+async function onReconnected() {
+  if (!boardLoaded) { if (!booting) boot(); return; }
+  // Edits made elsewhere while we were offline: fetch everything, rather than
+  // relying on the last-modified comparison in pollForChanges(). Record the
+  // server's timestamp first so the next poll doesn't refresh a second time.
+  try {
+    const { t } = await get('/api/last-modified');
+    await refreshAllData();
+    lastKnownModified = t;
+  } catch (_) { /* the failed request has already updated the offline note */ }
+}
+
+async function refreshAllData() {
+  const [columns, tasks, goals, user, bookmarks] = await Promise.all([
+    get('/api/columns'),
+    get('/api/tasks'),
+    get('/api/goals'),
+    get('/api/me'),
+    get('/api/bookmarks'),
+  ]);
+  state.columns   = columns;
+  state.tasks     = tasks;
+  state.goals     = goals;
+  state.user      = user;
+  state.bookmarks = bookmarks;
+  renderUser();
+  renderDebugPill();
+  renderHiddenTileButton();
+  updateGoalsButton();
+  renderBoard();
+  renderBookmarkList();
+  lastSyncedAt = Date.now();
+  updateSyncStamp(true);
+}
+
+window.addEventListener('offline', () => setConnection(false));
+window.addEventListener('online',  () => { if (isOffline) probeConnection(); });
+document.addEventListener('visibilitychange', () => {
+  if (isOffline && document.visibilityState === 'visible') probeConnection();
+});
+
+// Shown in place of the board when it couldn't be loaded at all (e.g. the
+// installed app opened with no connection). An empty canvas would look like
+// "you have no tasks", which is a lie (tenet 5).
+function showBoardUnavailable(show) {
+  let el = document.getElementById('board-unavailable');
+  if (!show) { if (el) el.remove(); return; }
+  if (el) return;
+  el = document.createElement('div');
+  el.id = 'board-unavailable';
+  el.className = 'board-unavailable';
+  el.setAttribute('role', 'status');
+  el.textContent = "Can't reach taskpapr. Your board will load when you're back online.";
+  document.getElementById('board-viewport').appendChild(el);
+}
+
 // ── Boot ──────────────────────────────────────────────────────
-init();
+async function boot() {
+  booting = true;
+  try {
+    await init();
+    boardLoaded = true;
+    showBoardUnavailable(false);
+  } catch (err) {
+    if (!err.offline) throw err;   // not a connectivity problem: surface it as before
+    showBoardUnavailable(true);
+    // Make sure the retry probe is running even if another request reported
+    // a response in the meantime; reconnecting calls boot() again.
+    isOffline = false;
+    setConnection(false);
+  } finally {
+    booting = false;
+  }
+}
+if (!navigator.onLine) setConnection(false);
+boot();
+
+// Service worker: makes taskpapr installable and lets the shell open offline.
+// It never caches board data (see public/sw.js).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .catch(err => console.warn('[taskpapr] service worker registration failed:', err.message));
+  });
+}

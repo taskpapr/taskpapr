@@ -6,12 +6,14 @@
   <title>taskpapr</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#f5f0e8" />
 </head>
 <body>
 
   <!-- Header -->
   <header class="app-header">
-    <div class="app-title"><img src="/icons/mark.svg" alt="" width="18" height="18" class="app-title__mark" /> taskpapr <span class="app-version" id="app-version"></span><span class="sync-stamp" id="sync-stamp"></span></div>
+    <div class="app-title"><img src="/icons/mark.svg" alt="" width="18" height="18" class="app-title__mark" /> taskpapr <span class="app-version" id="app-version"></span><span class="sync-stamp" id="sync-stamp"></span><span class="offline-note hidden" id="offline-note" role="status">Offline · changes won't save</span></div>
     <div class="header-actions">
       <button class="btn-ghost" id="btn-search" title="Search tasks (⌘K)">🔍 Search</button>
 

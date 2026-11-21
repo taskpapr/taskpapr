@@ -18,7 +18,12 @@
 #   wait-for LABEL [SEC] wait (default 30s) until `has LABEL` succeeds
 #   tap-text LABEL       tap the first visible node whose text, content-desc or hint is LABEL
 #   type TEXT            type ASCII text into the focused field
-#   key CODE             send a key event (66 = Enter, 4 = Back)
+#   key CODE             send a key event (66 = Enter, 4 = Back, 3 = Home)
+#   long-press LABEL     touch and hold the first visible node labelled LABEL
+#   top-activity         print the component of the foreground activity
+#   has-package PATTERN  exit 0 if an installed package name matches PATTERN (ERE)
+#   force-stop PKG       force-stop an app (e.g. com.android.chrome)
+#   net on|off           turn the emulator's wifi and mobile data on or off
 #   dismiss-popups       tap through Chrome first-run / promo dialogs
 #
 # Environment:
@@ -125,6 +130,22 @@ case "$cmd" in
     # `input text` treats spaces as separators; %s is its escape for a space.
     a shell input text "$(printf '%s' "$1" | sed 's/ /%s/g')" ;;
   key)       a shell input keyevent "$1" ;;
+  long-press)
+    xy=$(visible_matches "$1" | center_of) || die "no visible node labelled '$1'"
+    # shellcheck disable=SC2086
+    set -- $xy
+    a shell input swipe "$1" "$2" "$1" "$2" 1500 ;;
+  top-activity)
+    a shell dumpsys activity activities | grep -m1 topResumedActivity \
+      | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.$]+' | head -1 ;;
+  has-package) a shell pm list packages | grep -qE "$1" ;;
+  force-stop)  a shell am force-stop "$1" ;;
+  net)
+    case "${1:-}" in
+      on)  a shell svc wifi enable;  a shell svc data enable ;;
+      off) a shell svc wifi disable; a shell svc data disable ;;
+      *)   die "usage: net on|off" ;;
+    esac ;;
   dismiss-popups)
     # Chrome first-run, sign-in and promo screens. Loop until none are found.
     for _ in 1 2 3 4 5 6; do
