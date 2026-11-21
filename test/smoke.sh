@@ -199,6 +199,7 @@ if [[ -n "$TASK_ID" && "$TASK_ID" != "null" ]]; then
     -H "Content-Type: application/json" \
     -d '{"status":"wip"}')
   WIP_STATUS=$(echo "$WIP" | jq -r '.status' 2>/dev/null)
+  # shellcheck disable=SC2015  # ok() only echoes and increments a counter, so it never fails; C cannot run after a passing A
   [[ "$WIP_STATUS" == "wip" ]] && ok "PATCH /api/tasks/:id status=wip" || fail "PATCH /api/tasks/:id wip — got $WIP_STATUS"
 
   # Mark done
@@ -206,6 +207,7 @@ if [[ -n "$TASK_ID" && "$TASK_ID" != "null" ]]; then
     -H "Content-Type: application/json" \
     -d '{"status":"done"}')
   DONE_STATUS=$(echo "$DONE" | jq -r '.status' 2>/dev/null)
+  # shellcheck disable=SC2015  # ok() only echoes and increments a counter, so it never fails; C cannot run after a passing A
   [[ "$DONE_STATUS" == "done" ]] && ok "PATCH /api/tasks/:id status=done" || fail "PATCH /api/tasks/:id done — got $DONE_STATUS"
 
   # ACK (rot reset)
@@ -276,6 +278,7 @@ if [[ -n "$BM_ID" && "$BM_ID" != "null" ]]; then
     -H "Content-Type: application/json" \
     -d '{"name":"Smoke Test View (renamed)"}')
   BM_NEW_NAME=$(echo "$BM_RENAME" | jq -r '.name' 2>/dev/null)
+  # shellcheck disable=SC2015  # ok() only echoes and increments a counter, so it never fails; C cannot run after a passing A
   [[ "$BM_NEW_NAME" == "Smoke Test View (renamed)" ]] && ok "PATCH /api/bookmarks/:id rename" || fail "PATCH /api/bookmarks/:id — got name: $BM_NEW_NAME"
 
   DEL_BM=$(status -X DELETE "$BASE/api/bookmarks/$BM_ID")
@@ -295,6 +298,7 @@ IMPORT=$(body -X POST "$BASE/api/import?mode=merge" \
   -H "Content-Type: application/json" \
   -d "$EXPORT")
 IMPORT_OK=$(echo "$IMPORT" | jq -r '.ok' 2>/dev/null)
+# shellcheck disable=SC2015  # ok() only echoes and increments a counter, so it never fails; C cannot run after a passing A
 [[ "$IMPORT_OK" == "true" ]] && ok "POST /api/import?mode=merge" || fail "POST /api/import?mode=merge — got: $IMPORT"
 
 # ── Webhook ────────────────────────────────────────────────────
@@ -393,7 +397,6 @@ fi
 
 # Delete smoke-test API key
 if [[ -n "$KEY_RESP" ]]; then
-  KEY_ID=$(echo "$KEY_RESP" | jq -r '.name' 2>/dev/null || echo "")
   KEYS=$(body "$BASE/api/keys")
   SMOKE_KEY_ID=$(echo "$KEYS" | jq -r '.[] | select(.name=="smoke-test-key") | .id' 2>/dev/null || echo "")
   if [[ -n "$SMOKE_KEY_ID" && "$SMOKE_KEY_ID" != "null" ]]; then
