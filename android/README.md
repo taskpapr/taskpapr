@@ -145,6 +145,11 @@ so verification works in both directions.
 open it from **Files**, and allow **Install unknown apps** for that app when
 asked.
 
+**Install one, not both.** The app and the web app installed from Chrome
+("Install app") are the same taskpapr, so having both just gives you two
+icons. If you install this app, uninstall the Chrome-installed one (long-press
+its icon → **Uninstall**). Your board is on the server, so nothing is lost.
+
 ## Testing
 
 `test/android.sh` builds the staging APK on the emulator test host, installs

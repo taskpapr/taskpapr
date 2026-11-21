@@ -33,8 +33,9 @@
 # Gotchas baked in:
 #   - every adb call reads </dev/null, otherwise `adb shell` swallows the stdin
 #     of whatever script invoked us (e.g. a heredoc sent over ssh)
-#   - the emulator runs with -gpu swangle_indirect; swiftshader_indirect crashes
-#     as soon as Chrome renders a page
+#   - the emulator runs with -gpu swangle_indirect (swiftshader_indirect crashes
+#     as soon as Chrome renders) and -no-snapshot (a snapshot saved under
+#     another GPU mode crashes it the same way)
 #   - Chrome keeps hidden copies of some inputs with zero-size bounds; those
 #     are skipped when matching
 # ============================================================
@@ -89,8 +90,12 @@ case "$cmd" in
       [[ "$(a shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]] && break
       if ! is_running; then
         (( launched < 2 )) || die "emulator exited during boot (see ~/emulator.log)"
+        # -no-snapshot: always cold boot, never save. A quickboot snapshot
+        # keeps the GPU state of whatever renderer saved it; resuming one
+        # saved under another -gpu mode crashes the emulator as soon as
+        # Chrome renders ("Failed to find EmulatedEglImage").
         nohup "$EMULATOR" -avd "$AVD" -no-window -no-audio -no-boot-anim \
-          -gpu swangle_indirect -no-snapshot-save >"$HOME/emulator.log" 2>&1 </dev/null &
+          -gpu swangle_indirect -no-snapshot >"$HOME/emulator.log" 2>&1 </dev/null &
         disown
         launched=$((launched + 1))
       fi

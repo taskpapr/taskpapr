@@ -38,3 +38,7 @@ android/.kotlin/
 *.keystore
 keystore.properties
 *.keystore.properties
+*-release.properties
+# Gradle's own settings are the only properties files android/ should hold
+android/*.properties
+!android/gradle.properties

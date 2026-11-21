@@ -24,7 +24,8 @@
 #   ANDROID_REMOTE_DIR       build directory on the host (default taskpapr-android-build)
 #   ANDROID_EXPECT_VERIFIED  1 = fail if the URL bar is showing
 #   ANDROID_LOCK_HELD        1 = the caller (e.g. test/mobile.sh) already holds
-#                            the emulator lock, so don't take or release it
+#                            the emulator lock and owns the emulator: don't take
+#                            or release the lock, and never stop the emulator
 #   MOBILE_SHOTS_DIR         where screenshots land (default test/mobile/screenshots)
 #   MOBILE_LOCK_WAIT / MOBILE_LOCK_STALE   as in test/mobile.sh
 #
@@ -79,7 +80,8 @@ cleanup() {
     rsync -a -e "${SSH[*]}" "$HOST:$REMOTE_DIR/.shots/" "$SHOTS_DIR/" 2>/dev/null \
       && info "screenshots: $SHOTS_DIR"
     [[ $INSTALLED == 1 ]] && adb uninstall "$PKG" >/dev/null
-    [[ $EMULATOR_WAS_RUNNING == 0 ]] && droid stop >/dev/null
+    # In ANDROID_LOCK_HELD mode the caller owns the emulator; leave it running.
+    [[ $EMULATOR_WAS_RUNNING == 0 && $LOCK_HELD != 1 ]] && droid stop >/dev/null
     [[ $LOCKED == 1 ]] && r "rm -rf ~/emulator.lock"
   fi
   "${SSH[@]}" -O exit "$HOST" 2>/dev/null
@@ -97,29 +99,11 @@ shot() {
   droid shot "$REMOTE_DIR/.shots/$(printf 'android-%02d-%s.png' "$STEP" "$1")" || true
 }
 
-# ── Build (no emulator needed, so before the lock) ────────────
+# ── Lock ──────────────────────────────────────────────────────
+# Taken before syncing and building: two runs share ~/$REMOTE_DIR, so a
+# second run must not swap sources or the APK under the first.
 echo "taskpapr android test → $HOST"
 r true || setup_fail "cannot ssh to $HOST"
-info "syncing android/ to ~/$REMOTE_DIR"
-# (the host's shell may be zsh, where an unmatched glob is an error, so no globs)
-r "rm -rf ~/$REMOTE_DIR/.shots && mkdir -p ~/$REMOTE_DIR/test/mobile ~/$REMOTE_DIR/.shots" \
-  || setup_fail "cannot create ~/$REMOTE_DIR on the host"
-rsync -az --delete -e "${SSH[*]}" --exclude .gradle --exclude build --exclude local.properties \
-  "$ROOT/android/" "$HOST:$REMOTE_DIR/android/" || setup_fail "rsync to host failed"
-rsync -az -e "${SSH[*]}" "$ROOT/package.json" "$HOST:$REMOTE_DIR/package.json"
-rsync -az -e "${SSH[*]}" "$ROOT/test/mobile/droid.sh" "$HOST:$REMOTE_DIR/test/mobile/droid.sh"
-
-info "building the staging release APK (first run downloads Gradle and dependencies)"
-r "cd ~/$REMOTE_DIR/android && ./gradlew --no-daemon -q assembleStagingRelease </dev/null > ../build.log 2>&1" \
-  || { r "tail -30 ~/$REMOTE_DIR/build.log" >&2; fail "the staging APK did not build"; }
-# apksigner exits non-zero for an unsigned APK, i.e. no signing config on the host.
-# Newest installed build-tools (several versions can coexist).
-r "bt=\$(ls -d \"\${ANDROID_HOME:-\$HOME/Library/Android/sdk}\"/build-tools/* | tail -1) && \
-   \"\$bt/apksigner\" verify ~/$REMOTE_DIR/$APK </dev/null" >/dev/null 2>&1 \
-  || setup_fail "the APK built but isn't signed: set TASKPAPR_KEYSTORE_PROPERTIES on the host (android/README.md)"
-ok "the staging release APK builds and is signed"
-
-# ── Lock ──────────────────────────────────────────────────────
 if [[ $LOCK_HELD != 1 ]]; then
   info "acquiring emulator lock"
   deadline=$(( SECONDS + LOCK_WAIT ))
@@ -134,6 +118,26 @@ if [[ $LOCK_HELD != 1 ]]; then
   LOCKED=1
 fi
 
+# ── Build ─────────────────────────────────────────────────────
+info "syncing android/ to ~/$REMOTE_DIR"
+# (the host's shell may be zsh, where an unmatched glob is an error, so no globs)
+r "rm -rf ~/$REMOTE_DIR/.shots && mkdir -p ~/$REMOTE_DIR/test/mobile ~/$REMOTE_DIR/.shots" \
+  || setup_fail "cannot create ~/$REMOTE_DIR on the host"
+rsync -az --delete -e "${SSH[*]}" --exclude .gradle --exclude build --exclude local.properties \
+  "$ROOT/android/" "$HOST:$REMOTE_DIR/android/" || setup_fail "rsync to host failed"
+rsync -az -e "${SSH[*]}" "$ROOT/package.json" "$HOST:$REMOTE_DIR/package.json"
+rsync -az -e "${SSH[*]}" "$ROOT/test/mobile/droid.sh" "$HOST:$REMOTE_DIR/test/mobile/droid.sh"
+
+info "building the staging release APK (first run downloads Gradle and dependencies)"
+r "cd ~/$REMOTE_DIR/android && ./gradlew --no-daemon -q assembleStagingRelease </dev/null > ../build.log 2>&1" \
+  || { r "tail -30 ~/$REMOTE_DIR/build.log" >&2; fail "the staging APK did not build"; }
+# apksigner exits non-zero for an unsigned APK, i.e. no signing config on the
+# host. Use the newest build-tools by version (several can coexist).
+r "bt=\$(ls -d \"\${ANDROID_HOME:-\$HOME/Library/Android/sdk}\"/build-tools/* | sort -V | tail -1) && \
+   \"\$bt/apksigner\" verify ~/$REMOTE_DIR/$APK </dev/null" >/dev/null 2>&1 \
+  || setup_fail "the APK built but isn't signed: set TASKPAPR_KEYSTORE_PROPERTIES on the host (android/README.md)"
+ok "the staging release APK builds and is signed"
+
 # ── Emulator ──────────────────────────────────────────────────
 droid running || EMULATOR_WAS_RUNNING=0
 info "booting emulator$([[ $EMULATOR_WAS_RUNNING == 1 ]] && echo ' (already running)')"
@@ -141,13 +145,15 @@ droid boot >/dev/null || setup_fail "emulator failed to boot"
 
 # ── Install + launch ──────────────────────────────────────────
 adb uninstall "$PKG" >/dev/null 2>&1 || true   # start clean: no state from earlier runs
-adb install "\$HOME/$REMOTE_DIR/$APK" | grep -q Success || fail "the APK did not install"
+out=$(adb install "\$HOME/$REMOTE_DIR/$APK" 2>&1) || true
+[[ "$out" == *Success* ]] || fail "the APK did not install: $out"
 INSTALLED=1
 droid has-package "^package:${PKG//./\\.}[[:space:]]*\$" || fail "$PKG is not listed after installing"
 ok "installs on the emulator as $PKG"
 
 adb shell am force-stop com.android.chrome
-adb shell am start -W -n "$PKG/$LAUNCHER" | grep -q "Status: ok" || fail "the launcher activity did not start"
+out=$(adb shell am start -W -n "$PKG/$LAUNCHER" 2>&1) || true
+[[ "$out" == *"Status: ok"* ]] || fail "the launcher activity did not start: $out"
 # Render's free tier can take ~a minute to wake staging up.
 droid wait-for "$SIGN_IN" 150 || { shot no-ui; fail "the app did not show the taskpapr sign-in page"; }
 top=$(droid top-activity)
@@ -159,8 +165,10 @@ shot launched
 # ── Verified (no URL bar) or fallback ─────────────────────────
 # Chrome shows a Custom Tab toolbar with a URL bar when verification fails.
 adb shell uiautomator dump /sdcard/android-ui.xml >/dev/null
-url_bars=$(adb shell cat /sdcard/android-ui.xml | grep -o 'com.android.chrome:id/url_bar' | wc -l | tr -d ' ')
-if [[ "$url_bars" == 0 ]]; then
+ui=$(adb shell cat /sdcard/android-ui.xml) || ui=""
+url_bars=0
+[[ "$ui" == *'com.android.chrome:id/url_bar'* ]] && url_bars=1
+if [[ $url_bars == 0 ]]; then
   ok "Chrome verified the app against the site's assetlinks.json: full-screen, no URL bar"
 elif [[ "$EXPECT_VERIFIED" == 1 ]]; then
   shot url-bar
