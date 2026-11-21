@@ -2596,8 +2596,12 @@ function bindGlobalEvents() {
       return;
     }
 
+    const captureOpen = !document.getElementById('capture-modal').classList.contains('hidden');
+    if (captureOpen && e.key === 'Escape') { closeCapture(); return; }
+
     const tag = document.activeElement.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement.contentEditable === 'true') return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || document.activeElement.contentEditable === 'true') return;
+    if (captureOpen) return;   // no view switching behind the open sheet
 
     if (e.key === 'd' || e.key === 'D') { onTodayButton(); }
     if (e.key === 'g' || e.key === 'G') { if (state.goals.length > 0) toggleGoalTiles(); }
@@ -3655,13 +3659,16 @@ function buildTodayTaskRow(task, idx) {
   // Unflag button (amber strip click)
   const unflag = document.createElement('button');
   unflag.className = 'today-task-unflag';
-  unflag.style.cssText = 'background:none;border:none;cursor:pointer;color:#b45309;font-size:12px;padding:0 2px;flex-shrink:0;opacity:0.5;';
   unflag.textContent = '✕';
   unflag.title = 'Remove from Today';
   unflag.setAttribute('aria-label', `Remove from Today: ${task.title}`);
   unflag.addEventListener('click', async e => {
     e.stopPropagation();
-    await toggleTodayFlag(task.id, false);
+    try {
+      await toggleTodayFlag(task.id, false);
+    } catch (err) {
+      showToast(err.offline ? "Offline: that wasn't saved" : "Couldn't remove that from Today. Try again.");
+    }
   });
   unflag.addEventListener('mousedown', e => e.stopPropagation());
   row.appendChild(unflag);
@@ -3925,24 +3932,24 @@ function renderPhoneToday() {
   const tasks = todayTasksSorted();
   document.getElementById('phone-today-count').textContent = tasks.length ? `(${tasks.length})` : '';
   const list = document.getElementById('phone-today-list');
+  const scrollTop = list.scrollTop;   // refreshes (SSE, polls) must not lose the user's place
   list.innerHTML = '';
   if (tasks.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'phone-today-empty';
-    empty.textContent = 'Nothing flagged for Today. Flag tasks on the board (📅) to see them here.';
+    empty.textContent = 'Nothing flagged for Today.';
     list.appendChild(empty);
     return;
   }
   tasks.forEach((task, idx) => list.appendChild(buildTodayTaskRow(task, idx)));
+  list.scrollTop = scrollTop;
 }
 
 phoneMQ.addEventListener('change', () => {
-  // Rotating or resizing across the breakpoint: phones start on Today, and
-  // the floating tile isn't used on a phone.
-  if (isPhone()) {
-    phoneView = 'today';
-    if (state.showTodayTile) { state.showTodayTile = false; removeTodayTile(); }
-  }
+  // Rotating or resizing across the breakpoint keeps whichever screen the
+  // user last chose; only a fresh load starts on Today. The floating tile
+  // isn't used on a phone.
+  if (isPhone() && state.showTodayTile) { state.showTodayTile = false; removeTodayTile(); }
   setPhoneView(phoneView);
 });
 
@@ -3996,6 +4003,16 @@ function setCaptureError(msg) {
   el.classList.toggle('hidden', !msg);
 }
 
+// The server's reason for a rejected request (e.g. a limit), from api()'s
+// error, which carries the response body.
+function apiErrorReason(err) {
+  try {
+    const body = JSON.parse(err.message);
+    if (body && typeof body.error === 'string' && body.error) return body.error;
+  } catch (_) { /* not JSON */ }
+  return 'the server refused it. Your text is still here; try again.';
+}
+
 async function submitCapture() {
   const input  = document.getElementById('capture-input');
   const select = document.getElementById('capture-tile');
@@ -4018,7 +4035,7 @@ async function submitCapture() {
     // Keep the sheet open with the text intact, and say why (tenet 15)
     setCaptureError(err.offline
       ? "Offline: not saved. Your text is still here; try again when you're back online."
-      : "Couldn't save that task. Your text is still here; try again.");
+      : `Couldn't save that task: ${apiErrorReason(err)}`);
   } finally {
     save.disabled = captureTiles().length === 0;
   }

@@ -2017,6 +2017,17 @@ button {
 }
 
 /* Today tile task rows */
+.today-task-unflag {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #b45309;
+  font-size: 12px;
+  padding: 0 2px;
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
 .today-task-row {
   display: flex;
   align-items: center;
@@ -2263,7 +2274,8 @@ body.phone-today-active .zoom-indicator {
 
 .phone-today-list .today-task-row:hover { background: none; }
 
-/* Reordering is a mouse drag; on a phone it's done from the Today tile */
+/* Reordering is a mouse drag, so a phone keeps the order set on a wider
+   screen (touch reordering is not built yet) */
 .phone-today-list .today-drag-handle { display: none; }
 
 .phone-today-list .today-task-check {
@@ -2276,10 +2288,10 @@ body.phone-today-active .zoom-indicator {
   max-width: 96px;
 }
 
-/* The row builder sets compact inline styles for the tile; enlarge the tap target */
+/* Enlarge the tile's compact ✕ into a thumb-sized tap target */
 .phone-today-list .today-task-unflag {
-  font-size: 16px !important;
-  padding: 10px 6px !important;
+  font-size: 16px;
+  padding: 10px 6px;
 }
 
 .phone-today-empty {
@@ -2317,9 +2329,9 @@ body.phone-today-active .zoom-indicator {
 
   .app-title { min-width: 0; }
 
-  /* Canvas-management controls stay on wide screens. On a phone, done tasks
-     are cleared per tile and goals are reached from the user menu. */
-  #btn-add-column,
+  /* Board-wide controls stay on wide screens. On a phone, done tasks are
+     cleared per tile and goals are reached from the user menu. (+ Tile stays:
+     without a tile, nothing can be captured.) */
   #btn-clear-all,
   #btn-goals { display: none !important; }
 
