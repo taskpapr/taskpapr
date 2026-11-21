@@ -29,7 +29,7 @@ const {
   getDebugDate,
   refreshPostgresJobDebugDate,
 } = require('./lib/date');
-const { addConnection, removeConnection, emitUserChange } = require('./lib/events');
+const { addConnection, removeConnection, emitUserChange, closeAllConnections } = require('./lib/events');
 
 const { wakeDormantTasks }         = require('./services/dormancy');
 const { scheduleDailyNotifications } = require('./services/notifications');
@@ -273,6 +273,7 @@ async function start() {
   });
 
   // ── Start listening ─────────────────────────────────────────
+  const SHUTDOWN_TIMEOUT_MS = 10_000;
   const server = app.listen(PORT, () => {
     console.log(`taskpapr running at http://localhost:${PORT}`);
     scheduleDailyNotifications();
@@ -291,12 +292,28 @@ async function start() {
     runDormancySweep();
     const dormancyInterval = setInterval(runDormancySweep, 60 * 60 * 1000);
 
-    function shutdown() {
+    // Graceful shutdown (Render sends SIGTERM on every deploy, then SIGKILLs
+    // after 30s). server.close() stops accepting and waits for open
+    // connections; Node also drops idle keep-alive sockets, but SSE streams
+    // never end by themselves, so end them explicitly. In-flight requests
+    // finish normally. The unref'd timer is a backstop for anything that
+    // still hangs (e.g. a stuck DB query): force-close and exit non-zero.
+    let shuttingDown = false;
+    function shutdown(signal) {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log(`[shutdown] ${signal} received, closing`);
       clearInterval(dormancyInterval);
+      setTimeout(() => {
+        console.error('[shutdown] timed out waiting for connections; forcing exit');
+        server.closeAllConnections();
+        process.exit(1);
+      }, SHUTDOWN_TIMEOUT_MS).unref();
       server.close(() => {
         if (pool) pool.end().then(() => process.exit(0)).catch(() => process.exit(1));
         else process.exit(0);
       });
+      closeAllConnections();
     }
     process.on('SIGTERM', shutdown);
     process.on('SIGINT',  shutdown);
