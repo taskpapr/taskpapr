@@ -90,6 +90,7 @@ DBG_RESP=$(body -X POST "$BASE/api/admin/debug/date" \
   -d "{\"date\":\"$DEBUG_DATE\"}")
 assert_json_has "Set debug date" "$DBG_RESP"
 DBG_OK=$(echo "$DBG_RESP" | jq -r '.ok' 2>/dev/null || echo "false")
+# shellcheck disable=SC2015  # ok() only echoes and increments a counter, so it never fails; C cannot run after a passing A
 [[ "$DBG_OK" == "true" ]] && ok "POST /api/admin/debug/date" || fail "POST /api/admin/debug/date did not return ok=true"
 
 info "Creating a test tile (column)"
