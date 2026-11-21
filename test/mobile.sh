@@ -323,7 +323,11 @@ shot today-ticked
 # not after the 5-minute safety-net poll (the live-update stream is dropped
 # or ignored while hidden). A marker on window proves the page wasn't reloaded.
 today3="Today three"
-[[ "$(page 'window.__catchUpMarker = 1; document.visibilityState')" == visible ]] \
+# Count full data refreshes from here on (refreshAllData is a global function).
+[[ "$(page 'window.__catchUpMarker = 1; window.__refreshes = 0;
+  const orig = refreshAllData;
+  refreshAllData = (...args) => { window.__refreshes++; return orig(...args); };
+  document.visibilityState')" == visible ]] \
   || fail "could not mark the page before backgrounding it"
 droid key 3; sleep 3
 [[ "$(page 'document.visibilityState')" == hidden ]] || fail "Chrome did not go to the background"
@@ -333,6 +337,10 @@ droid resume com.android.chrome
 if droid wait-for "$today3" 10; then
   [[ "$(page 'String(window.__catchUpMarker)')" == 1 ]] || fail "the page reloaded on resume, so the catch-up wasn't what showed the change"
   ok "a change made while the app was in the background shows within seconds of returning"
+  sleep 15   # long enough for the live-update stream to reconnect and run its own catch-up
+  refreshes=$(page 'String(window.__refreshes)')
+  [[ "$refreshes" == 1 ]] || fail "returning to the app refreshed the board $refreshes times for one change (expected 1)"
+  ok "returning to the app refreshes the board once, not once per resume signal"
 else shot resume-stale; fail "after returning to the app, '$today3' (flagged while it was in the background) was not shown within 10s"; fi
 
 # 3. The app shortcut's URL opens capture directly: one action from the home screen.
