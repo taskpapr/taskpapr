@@ -23,6 +23,8 @@
 #   top-activity         print the component of the foreground activity
 #   has-package PATTERN  exit 0 if an installed package name matches PATTERN (ERE)
 #   force-stop PKG       force-stop an app (e.g. com.android.chrome)
+#   resume PKG           bring an app's existing task to the front, without
+#                        navigating (as tapping its launcher icon would)
 #   net on|off           turn the emulator's wifi and mobile data on or off
 #   rotate portrait|landscape  fix the screen orientation (auto-rotate off)
 #   dismiss-popups       tap through Chrome first-run / promo dialogs
@@ -144,6 +146,14 @@ case "$cmd" in
       | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.$]+' | head -1 ;;
   has-package) a shell pm list packages | grep -qE "$1" ;;
   force-stop)  a shell am force-stop "$1" ;;
+  resume)
+    # Launcher intent on the app's main activity: Android brings the existing
+    # task to the front ("Activity not started, its current task has been
+    # brought to the front") instead of opening anything new. Only Chrome's
+    # launcher activity is known here.
+    [[ "$1" == com.android.chrome ]] || die "resume: only com.android.chrome is supported"
+    a shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
+      -n com.android.chrome/com.google.android.apps.chrome.Main >/dev/null 2>&1 ;;
   net)
     case "${1:-}" in
       on)  a shell svc wifi enable;  a shell svc data enable ;;

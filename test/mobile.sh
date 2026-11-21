@@ -254,6 +254,9 @@ fit=$(page "$HEADER_FIT_JS") || fail "could not inspect the header layout"
 [[ "$fit" == fits ]] || { shot header-clipped; fail "phone header does not fit: $fit"; }
 ok "the phone header fits the screen with every control visible"
 
+# Chrome keeps localStorage for this origin between runs (an aborted run
+# skips the uninstall that clears it), so forget any remembered tile first.
+page 'localStorage.removeItem("taskpapr.captureTileId"); "ok"' >/dev/null || fail "could not reset the remembered tile"
 droid tap-text "$TODAY_ADD"
 droid wait-for "$CAPTURE_HINT" 10 || { shot no-capture; fail "'+ Add task' on the Today screen did not open capture"; }
 [[ "$(page 'document.activeElement && document.activeElement.id')" == capture-input ]] \
@@ -316,6 +319,22 @@ droid has "$today1" && { shot ticked-still-shown; fail "'$today1' is done but st
 ok "ticking a task completes it via the API and removes it from Today"
 shot today-ticked
 
+# Changes made while the app is in the background show as soon as it's back,
+# not after the 5-minute safety-net poll (the live-update stream is dropped
+# or ignored while hidden). A marker on window proves the page wasn't reloaded.
+today3="Today three"
+[[ "$(page 'window.__catchUpMarker = 1; document.visibilityState')" == visible ]] \
+  || fail "could not mark the page before backgrounding it"
+droid key 3; sleep 3
+[[ "$(page 'document.visibilityState')" == hidden ]] || fail "Chrome did not go to the background"
+mk_today "$today3" 3 >/dev/null || fail "could not flag '$today3' for Today via the API"
+sleep 5   # let the change's live-update event arrive while hidden
+droid resume com.android.chrome
+if droid wait-for "$today3" 10; then
+  [[ "$(page 'String(window.__catchUpMarker)')" == 1 ]] || fail "the page reloaded on resume, so the catch-up wasn't what showed the change"
+  ok "a change made while the app was in the background shows within seconds of returning"
+else shot resume-stale; fail "after returning to the app, '$today3' (flagged while it was in the background) was not shown within 10s"; fi
+
 # 3. The app shortcut's URL opens capture directly: one action from the home screen.
 droid open "$BASE/?capture=1"
 droid wait-for "$CAPTURE_HINT" 30 || { shot shortcut-no-capture; fail "/?capture=1 did not open capture"; }
@@ -366,7 +385,7 @@ droid wait-for "$label" 15 || { shot wide-no-board; fail "a wide screen does not
 tile=$(page 'document.getElementById("btn-today").click(); new Promise(r => setTimeout(() => r(JSON.stringify({
     tile: !!document.getElementById("today-tile"),
     rows: [...document.querySelectorAll("#today-tile .today-task-title")].map(e => e.textContent) })), 300))')
-[[ "$tile" == "{\"tile\":true,\"rows\":[\"$today2\"]}" ]] || { shot wide-no-tile; fail "on a wide screen 📅 did not open the Today tile as before ($tile)"; }
+[[ "$tile" == "{\"tile\":true,\"rows\":[\"$today2\",\"$today3\"]}" ]] || { shot wide-no-tile; fail "on a wide screen 📅 did not open the Today tile as before ($tile)"; }
 shot wide-today-tile
 [[ "$(page 'document.getElementById("btn-today").click(); !!document.getElementById("today-tile")')" == false ]] \
   || fail "on a wide screen 📅 did not close the Today tile again"

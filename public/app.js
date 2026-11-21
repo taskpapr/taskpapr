@@ -303,6 +303,9 @@ const del   = p      => api('DELETE', p);
 
 // ── Bootstrap ────────────────────────────────────────────────
 async function init() {
+  // Read the change stamp before the data, so anything changed while the
+  // board loads is still newer than it and gets picked up by the next check.
+  const { t: loadedStamp } = await get('/api/last-modified');
   const [columns, tasks, goals, user, bookmarks] = await Promise.all([
     get('/api/columns'),
     get('/api/tasks'),
@@ -315,6 +318,7 @@ async function init() {
   state.goals     = goals;
   state.user      = user;
   state.bookmarks = bookmarks;
+  lastKnownModified = loadedStamp;
 
   restoreViewState();
 
@@ -3242,11 +3246,12 @@ document.getElementById('btn-find-on-board').addEventListener('click', () => {
 // Close button
 document.getElementById('notes-panel-close').addEventListener('click', closeNotesPanel);
 
-// ── Wake-on-visibility (handles laptop lid open / tab switch back) ────────
-// When the browser tab becomes visible after being hidden for more than
-// STALE_THRESHOLD ms, silently re-fetch state from the server and re-render.
-// This handles the common case of opening the laptop in the morning and
-// finding the board showing yesterday's dormant/urgency state.
+// ── Wake-on-visibility (laptop lid open, tab switch, phone app switch) ──────
+// Whenever the page becomes visible again, catch up on what changed while it
+// was hidden: the live-update stream is dropped or ignored meanwhile (see
+// "Change checks" below). After more than STALE_THRESHOLD ms it re-fetches
+// and re-renders everything instead, since time-based state (urgency,
+// dormancy) has moved on too, e.g. opening the laptop in the morning.
 
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 let hiddenAt = null;
@@ -3262,32 +3267,29 @@ document.addEventListener('visibilitychange', async () => {
   const elapsed = Date.now() - hiddenAt;
   hiddenAt = null;
 
-  if (elapsed < STALE_THRESHOLD_MS) return; // short switch — no need to refresh
+  if (!boardLoaded) return;
 
-  // Silent background refresh — don't disrupt the user if the panel is open
+  if (elapsed < STALE_THRESHOLD_MS) {
+    // Short absence (an app switch on a phone): catch up on anything that
+    // changed meanwhile. The live-update stream may have been dropped while
+    // hidden, so don't wait up to 5 minutes for the safety-net poll (tenet 5).
+    scheduleCatchUp();
+    return;
+  }
+
+  // Long absence: re-render everything, since time-based state (urgency,
+  // dormancy) has moved on even if no data changed. Silent: doesn't disrupt
+  // an open panel. Failures surface through the offline note.
   try {
-    const [columns, tasks, goals, user, bookmarks] = await Promise.all([
-      get('/api/columns'),
-      get('/api/tasks'),
-      get('/api/goals'),
-      get('/api/me'),
-      get('/api/bookmarks'),
-    ]);
-    state.columns   = columns;
-    state.tasks     = tasks;
-    state.goals     = goals;
-    state.user      = user;
-    state.bookmarks = bookmarks;
-    renderUser();
-    renderDebugPill();
-    renderHiddenTileButton();
-    updateGoalsButton();
-    renderBoard();
-    renderBookmarkList();
+    await refreshEverything();
   } catch (err) {
-    // Server may be unreachable (e.g. laptop woke on a different network) — ignore silently
     console.warn('[taskpapr] visibility refresh failed:', err.message);
   }
+});
+
+// Back from the back/forward cache: the page was frozen, not reloaded.
+window.addEventListener('pageshow', e => {
+  if (e.persisted && boardLoaded) scheduleCatchUp();
 });
 
 // ── Sync timestamp display ────────────────────────────────────
@@ -3325,24 +3327,79 @@ function startSyncStampTicker() {
   _syncStampTimer = setInterval(() => updateSyncStamp(false), 30_000);
 }
 
-// ── 60-second cross-device polling ────────────────────────────
-// Polls /api/last-modified every 60s when the tab is active and visible.
-// Only does a full re-fetch if the server timestamp has advanced.
-// This covers the case of editing on one device and viewing on another
-// without needing to manually refresh.
-let lastKnownModified = null;
+// ── Change checks ─────────────────────────────────────────────
+// pollForChanges() asks /api/last-modified whether anything changed since
+// the board last loaded, and re-fetches only if so. It runs:
+//   - after every live-update (SSE) event, coalesced
+//   - when the live-update stream (re)opens, and when the page becomes
+//     visible again or returns from the back/forward cache: a phone drops
+//     the stream while the app is in the background, so this catches up on
+//     whatever was missed (scheduleCatchUp)
+//   - every 5 minutes as a safety net (missed events, buffering proxies)
+// There is no faster timer: SSE plus these catch-ups keep it current.
+let lastKnownModified = null;   // set by init() from the stamp read before loading
 
-async function pollForChanges() {
-  if (document.visibilityState !== 'visible') return;
+// Only one sync runs at a time, so a resume that fires both visibilitychange
+// and the stream reopening can't start two refreshes. A change check asked
+// for while a sync is running is remembered and run once afterwards: the
+// running sync may have read the stamp before that change landed. Checks
+// only re-fetch when the stamp moved, so this never refreshes twice for the
+// same change.
+let _syncInFlight = null;
+let _checkAgain   = false;
+function syncOnce(fn) {
+  if (!_syncInFlight) {
+    _syncInFlight = (async () => {
+      try {
+        let failure = null;
+        try { await fn(); } catch (err) { failure = err; }
+        // checkForChanges never throws, so a queued check always runs
+        while (_checkAgain) { _checkAgain = false; await checkForChanges(); }
+        if (failure) throw failure;
+      } finally { _syncInFlight = null; }
+    })();
+  }
+  return _syncInFlight;
+}
+
+// Re-fetch everything and record the change stamp it reflects.
+async function fullRefresh() {
+  const { t } = await get('/api/last-modified');
+  await refreshAllData();
+  lastKnownModified = t;
+}
+
+// A full refresh that must happen (reconnecting, a long absence). If a
+// change check is already running this joins it, and only when that check
+// found nothing new does the full refresh still run: it also re-renders
+// time-based state and catches deletions, which the change stamp doesn't
+// reflect. Either way the board is refreshed exactly once.
+async function refreshEverything() {
+  const before = lastSyncedAt;
+  await syncOnce(fullRefresh);
+  if (lastSyncedAt === before) await syncOnce(fullRefresh);
+}
+
+// Debounced: several resume signals within a moment lead to one check.
+let _catchUpTimer = null;
+function scheduleCatchUp() {
+  clearTimeout(_catchUpTimer);
+  _catchUpTimer = setTimeout(pollForChanges, 250);
+}
+
+// Called from timers and event handlers, so it never rejects: a joined sync
+// that fails has already reported through the offline note.
+function pollForChanges() {
+  if (_syncInFlight) _checkAgain = true;
+  return (_syncInFlight || syncOnce(checkForChanges)).catch(() => {});
+}
+
+async function checkForChanges() {
+  if (document.visibilityState !== 'visible' || !boardLoaded) return;
   try {
     const { t } = await get('/api/last-modified');
     if (t === null) return; // no data yet
-    if (lastKnownModified === null) {
-      // First poll — just record the current timestamp, don't re-render
-      lastKnownModified = t;
-      return;
-    }
-    if (t === lastKnownModified) return; // nothing changed
+    if (t === lastKnownModified) return; // nothing changed (null at load = the board was empty)
     // Something changed on the server — do a full silent refresh
     // (flashes the sync stamp to signal that remote changes arrived).
     // Record t only once the refresh succeeded, so a failed refresh is
@@ -3365,8 +3422,16 @@ async function pollForChanges() {
 // five endpoints per event.
 let _sseRefreshTimer = null;
 
+let _sseOpenedBefore = false;
+
 (function startSse() {
   const es = new EventSource('/api/events');
+  es.onopen = () => {
+    // The first open is part of page load, which fetches everything anyway.
+    // Any later open is a reconnect: events may have been missed meanwhile.
+    if (!_sseOpenedBefore) { _sseOpenedBefore = true; return; }
+    scheduleCatchUp();
+  };
   es.onmessage = (e) => {
     if (e.data !== 'change') return;
     clearTimeout(_sseRefreshTimer);
@@ -4118,9 +4183,7 @@ async function onReconnected() {
   // relying on the last-modified comparison in pollForChanges(). Record the
   // server's timestamp first so the next poll doesn't refresh a second time.
   try {
-    const { t } = await get('/api/last-modified');
-    await refreshAllData();
-    lastKnownModified = t;
+    await refreshEverything();   // joins a running check without refreshing twice
   } catch (_) { /* the failed request has already updated the offline note */ }
 }
 
