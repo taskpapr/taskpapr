@@ -54,7 +54,7 @@ REMOTE_PATH='export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin";'
 r()     { "${SSH[@]}" "$HOST" "$REMOTE_PATH $*"; }
 droid() { r "bash ~/$REMOTE_DIR/test/mobile/droid.sh $(printf '%q ' "$@")"; }
 
-LOCKED=0; SERVER_STARTED=0; EMULATOR_WAS_RUNNING=1; REVERSED=0; TUNNEL=0; STEP=0; NET_OFF=0
+LOCKED=0; SERVER_STARTED=0; EMULATOR_WAS_RUNNING=1; REVERSED=0; TUNNEL=0; STEP=0; NET_OFF=0; ROTATED=0
 RUN_TMP=""
 
 cleanup() {
@@ -69,6 +69,7 @@ cleanup() {
     # Both throwaway servers (the sign-in-required one only exists briefly)
     [[ $SERVER_STARTED == 1 ]] && r "kill \$(cat '$RUN_TMP'/*.pid) 2>/dev/null; sleep 1; kill -9 \$(cat '$RUN_TMP'/*.pid) 2>/dev/null; rm -rf '$RUN_TMP'"
     [[ $NET_OFF == 1 ]] && droid net on
+    [[ $ROTATED == 1 ]] && droid rotate portrait
     [[ $REVERSED == 1 ]] && droid unreverse "$PORT"
     [[ $EMULATOR_WAS_RUNNING == 0 ]] && droid stop >/dev/null
     r "rm -rf ~/emulator.lock"
@@ -349,6 +350,29 @@ for _ in $(seq 1 30); do droid has "Offline · changes won't save" || break; sle
 droid tap-text Add || fail "no Add button to retry the capture"
 task_in_api "$cap3" >/dev/null || { shot retry-missing; fail "retrying the capture after reconnecting did not save it"; }
 ok "retrying after reconnecting saves the kept text"
+
+# 5. Wide screens are unchanged: in landscape (wider than 600px) taskpapr
+#    shows the canvas, and 📅 toggles the floating Today tile as before.
+droid has "$CAPTURE_HINT" && { shot capture-left-open; fail "capture stayed open after the retry saved"; }
+droid rotate landscape; ROTATED=1
+wide=""
+for _ in $(seq 1 15); do
+  wide=$(page 'JSON.stringify({ phone: matchMedia("(max-width: 600px)").matches,
+    today: !document.getElementById("phone-today").classList.contains("hidden") })') || true
+  [[ "$wide" == '{"phone":false,"today":false}' ]] && break; sleep 1
+done
+[[ "$wide" == '{"phone":false,"today":false}' ]] || { shot wide-phone-ui; fail "a wide screen still shows the phone Today screen ($wide)"; }
+droid wait-for "$label" 15 || { shot wide-no-board; fail "a wide screen does not show the board"; }
+tile=$(page 'document.getElementById("btn-today").click(); new Promise(r => setTimeout(() => r(JSON.stringify({
+    tile: !!document.getElementById("today-tile"),
+    rows: [...document.querySelectorAll("#today-tile .today-task-title")].map(e => e.textContent) })), 300))')
+[[ "$tile" == "{\"tile\":true,\"rows\":[\"$today2\"]}" ]] || { shot wide-no-tile; fail "on a wide screen 📅 did not open the Today tile as before ($tile)"; }
+shot wide-today-tile
+[[ "$(page 'document.getElementById("btn-today").click(); !!document.getElementById("today-tile")')" == false ]] \
+  || fail "on a wide screen 📅 did not close the Today tile again"
+ok "wide screens keep the canvas and the floating Today tile"
+droid rotate portrait; ROTATED=0
+droid wait-for "$TODAY_ADD" 15 || { shot portrait-not-today; fail "back in portrait, the Today screen did not return"; }
 
 # ── PWA: installable, standalone, honest offline ──────────────
 echo; echo "PWA: install, standalone launch, offline"

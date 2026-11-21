@@ -24,6 +24,7 @@
 #   has-package PATTERN  exit 0 if an installed package name matches PATTERN (ERE)
 #   force-stop PKG       force-stop an app (e.g. com.android.chrome)
 #   net on|off           turn the emulator's wifi and mobile data on or off
+#   rotate portrait|landscape  fix the screen orientation (auto-rotate off)
 #   dismiss-popups       tap through Chrome first-run / promo dialogs
 #   eval PREFIX JS       evaluate JS in the Chrome page whose URL starts with PREFIX
 #                        (DevTools protocol; prints the result)
@@ -155,6 +156,14 @@ case "$cmd" in
     node "$(dirname "$0")/cdp-eval.js" "$cdp_port" "$1" "$2"; rc=$?
     a forward --remove "tcp:$cdp_port" >/dev/null 2>&1
     exit $rc ;;
+  rotate)
+    case "${1:-}" in
+      portrait)  r=0 ;;
+      landscape) r=1 ;;
+      *) die "usage: rotate portrait|landscape" ;;
+    esac
+    a shell settings put system accelerometer_rotation 0
+    a shell settings put system user_rotation "$r" ;;
   dismiss-popups)
     # Chrome first-run, sign-in and promo screens. Loop until none are found.
     for _ in 1 2 3 4 5 6; do
