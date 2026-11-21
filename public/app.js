@@ -459,7 +459,10 @@ function syncTodayButton() {
   const flagged = state.tasks.filter(t => t.today_flag && t.status !== 'done').length;
   // Always visible — count badge shown when tasks are flagged, empty otherwise
   countEl.textContent = flagged > 0 ? flagged : '';
-  btn.classList.toggle('active', state.showTodayTile);
+  btn.classList.toggle('active', isPhone() ? phoneTodayShown() : state.showTodayTile);
+  // On a phone the button switches screens; say which one it leads to
+  if (isPhone()) btn.setAttribute('aria-label', phoneTodayShown() ? 'Show board' : 'Show Today');
+  else btn.removeAttribute('aria-label');
   // Note: we deliberately do NOT auto-close the tile when flagged === 0 here.
   // If the user explicitly opened it and there are no tasks, the empty state
   // message is the honest, correct response (Design Tenet 5).
@@ -515,6 +518,7 @@ function renderBoard() {
   syncTodayButton();
   renderHiddenTileButton();
   if (state.showTodayTile) renderTodayTile();
+  renderPhoneToday();
 }
 
 // ── Goal smart-tiles ─────────────────────────────────────────
@@ -2595,7 +2599,7 @@ function bindGlobalEvents() {
     const tag = document.activeElement.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement.contentEditable === 'true') return;
 
-    if (e.key === 'd' || e.key === 'D') { toggleTodayTile(); }
+    if (e.key === 'd' || e.key === 'D') { onTodayButton(); }
     if (e.key === 'g' || e.key === 'G') { if (state.goals.length > 0) toggleGoalTiles(); }
     if (e.key === 'Escape') {
       hideAllMenus();
@@ -3582,10 +3586,10 @@ function removeTodayTile() {
   if (existing) existing.remove();
 }
 
-function renderTodayTile() {
-  removeTodayTile();
-
-  const tasks = state.tasks
+// Today's not-done tasks, in Today order. Shared by the floating Today tile
+// and the phone Today screen so the two can never disagree (tenet 5).
+function todayTasksSorted() {
+  return state.tasks
     .filter(t => t.today_flag && t.status !== 'done')
     .sort((a, b) => {
       // today_order first, then position within tile
@@ -3593,6 +3597,82 @@ function renderTodayTile() {
       const ob = b.today_order != null ? b.today_order : 9999;
       return oa - ob || a.position - b.position;
     });
+}
+
+// One Today row: drag handle, checkbox, title, tile badge, unflag button.
+// Used by the Today tile and the phone Today screen.
+function buildTodayTaskRow(task, idx) {
+  const col = state.columns.find(c => c.id === task.column_id);
+  const row = document.createElement('div');
+  row.className = 'today-task-row';
+  row.dataset.taskId = task.id;
+  row.dataset.todayIdx = idx;
+
+  // Drag handle
+  const handle = document.createElement('span');
+  handle.className = 'today-drag-handle';
+  handle.textContent = '⠿';
+  handle.title = 'Drag to reorder';
+  row.appendChild(handle);
+
+  // Checkbox
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.className = 'today-task-check';
+  check.checked = false;
+  check.title = 'Mark done';
+  check.setAttribute('aria-label', `Mark done: ${task.title}`);
+  check.addEventListener('change', async e => {
+    e.stopPropagation();
+    try {
+      await toggleDone(task.id, true);
+    } catch (err) {
+      // Never leave a ticked box for a task that didn't save (tenet 15)
+      check.checked = false;
+      showToast(err.offline ? "Offline: that wasn't saved" : "Couldn't mark that done. Try again.");
+    }
+  });
+  check.addEventListener('mousedown', e => e.stopPropagation());
+  row.appendChild(check);
+
+  // Title
+  const titleSpan = document.createElement('span');
+  titleSpan.className = 'today-task-title';
+  titleSpan.textContent = task.title;
+  titleSpan.title = task.title;
+  titleSpan.addEventListener('click', () => openNotesPanel(task.id));
+  row.appendChild(titleSpan);
+
+  // Tile badge
+  if (col) {
+    const badge = document.createElement('span');
+    badge.className = 'today-task-tile-badge';
+    badge.textContent = col.name;
+    badge.title = col.name;
+    row.appendChild(badge);
+  }
+
+  // Unflag button (amber strip click)
+  const unflag = document.createElement('button');
+  unflag.className = 'today-task-unflag';
+  unflag.style.cssText = 'background:none;border:none;cursor:pointer;color:#b45309;font-size:12px;padding:0 2px;flex-shrink:0;opacity:0.5;';
+  unflag.textContent = '✕';
+  unflag.title = 'Remove from Today';
+  unflag.setAttribute('aria-label', `Remove from Today: ${task.title}`);
+  unflag.addEventListener('click', async e => {
+    e.stopPropagation();
+    await toggleTodayFlag(task.id, false);
+  });
+  unflag.addEventListener('mousedown', e => e.stopPropagation());
+  row.appendChild(unflag);
+
+  return row;
+}
+
+function renderTodayTile() {
+  removeTodayTile();
+
+  const tasks = todayTasksSorted();
 
   const tile = document.createElement('div');
   tile.id = 'today-tile';
@@ -3629,64 +3709,7 @@ function renderTodayTile() {
     empty.textContent = 'No tasks flagged for today';
     body.appendChild(empty);
   } else {
-    tasks.forEach((task, idx) => {
-      const col = state.columns.find(c => c.id === task.column_id);
-      const row = document.createElement('div');
-      row.className = 'today-task-row';
-      row.dataset.taskId = task.id;
-      row.dataset.todayIdx = idx;
-
-      // Drag handle
-      const handle = document.createElement('span');
-      handle.className = 'today-drag-handle';
-      handle.textContent = '⠿';
-      handle.title = 'Drag to reorder';
-      row.appendChild(handle);
-
-      // Checkbox
-      const check = document.createElement('input');
-      check.type = 'checkbox';
-      check.className = 'today-task-check';
-      check.checked = false;
-      check.title = 'Mark done';
-      check.addEventListener('change', async e => {
-        e.stopPropagation();
-        await toggleDone(task.id, true);
-      });
-      check.addEventListener('mousedown', e => e.stopPropagation());
-      row.appendChild(check);
-
-      // Title
-      const titleSpan = document.createElement('span');
-      titleSpan.className = 'today-task-title';
-      titleSpan.textContent = task.title;
-      titleSpan.title = task.title;
-      titleSpan.addEventListener('click', () => openNotesPanel(task.id));
-      row.appendChild(titleSpan);
-
-      // Tile badge
-      if (col) {
-        const badge = document.createElement('span');
-        badge.className = 'today-task-tile-badge';
-        badge.textContent = col.name;
-        badge.title = col.name;
-        row.appendChild(badge);
-      }
-
-      // Unflag button (amber strip click)
-      const unflag = document.createElement('button');
-      unflag.style.cssText = 'background:none;border:none;cursor:pointer;color:#b45309;font-size:12px;padding:0 2px;flex-shrink:0;opacity:0.5;';
-      unflag.textContent = '✕';
-      unflag.title = 'Remove from Today';
-      unflag.addEventListener('click', async e => {
-        e.stopPropagation();
-        await toggleTodayFlag(task.id, false);
-      });
-      unflag.addEventListener('mousedown', e => e.stopPropagation());
-      row.appendChild(unflag);
-
-      body.appendChild(row);
-    });
+    tasks.forEach((task, idx) => body.appendChild(buildTodayTaskRow(task, idx)));
 
     // Simple drag-to-reorder within Today tile
     setupTodayDragReorder(body);
@@ -3861,8 +3884,172 @@ document.getElementById('context-menu').addEventListener('click', async e => {
 // Wire Today header button
 (function() {
   const btn = document.getElementById('btn-today');
-  if (btn) btn.addEventListener('click', () => toggleTodayTile());
+  if (btn) btn.addEventListener('click', () => onTodayButton());
 })();
+
+// ── Phone: Today screen ───────────────────────────────────────
+// On a narrow screen the canvas is the wrong tool for the two things a phone
+// is for: glancing at / ticking off Today, and capturing a task. So phones
+// open to a full-screen Today list (the same tasks, in the same order, as the
+// Today tile), and the 📅 button toggles between it and the canvas. Wide
+// screens are untouched: there, 📅 still toggles the floating Today tile
+// (DESIGN.md tenets 1, 3, 10).
+const phoneMQ = window.matchMedia('(max-width: 600px)');
+let phoneView = phoneMQ.matches ? 'today' : 'board';   // 'today' | 'board' (phones only)
+
+function isPhone() { return phoneMQ.matches; }
+function phoneTodayShown() { return isPhone() && phoneView === 'today'; }
+
+function onTodayButton() {
+  if (!isPhone()) { toggleTodayTile(); return; }
+  setPhoneView(phoneView === 'today' ? 'board' : 'today');
+}
+
+function setPhoneView(v) {
+  phoneView = v;
+  renderPhoneToday();
+  syncTodayButton();
+  // The canvas was hidden while the Today screen showed: re-check which
+  // tiles are on screen now that it has a size again.
+  if (!phoneTodayShown()) updateOffscreenIndicators();
+}
+
+function renderPhoneToday() {
+  const screen = document.getElementById('phone-today');
+  if (!screen) return;
+  const show = phoneTodayShown();
+  screen.classList.toggle('hidden', !show);
+  document.body.classList.toggle('phone-today-active', show);
+  if (!show) return;
+
+  const tasks = todayTasksSorted();
+  document.getElementById('phone-today-count').textContent = tasks.length ? `(${tasks.length})` : '';
+  const list = document.getElementById('phone-today-list');
+  list.innerHTML = '';
+  if (tasks.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'phone-today-empty';
+    empty.textContent = 'Nothing flagged for Today. Flag tasks on the board (📅) to see them here.';
+    list.appendChild(empty);
+    return;
+  }
+  tasks.forEach((task, idx) => list.appendChild(buildTodayTaskRow(task, idx)));
+}
+
+phoneMQ.addEventListener('change', () => {
+  // Rotating or resizing across the breakpoint: phones start on Today, and
+  // the floating tile isn't used on a phone.
+  if (isPhone()) {
+    phoneView = 'today';
+    if (state.showTodayTile) { state.showTodayTile = false; removeTodayTile(); }
+  }
+  setPhoneView(phoneView);
+});
+
+// ── Quick capture ─────────────────────────────────────────────
+// One capture screen for every entry point: the Today screen's "+ Add task",
+// the app icon's "Add task" shortcut (/?capture=1), and later the share
+// target and the home-screen widget. A single field plus a tile picker that
+// remembers the last tile used on this device.
+const CAPTURE_TILE_KEY = 'taskpapr.captureTileId';
+
+function captureTiles() {
+  return state.columns.filter(c => !c.hidden);
+}
+
+function rememberedCaptureTileId() {
+  try { return parseInt(localStorage.getItem(CAPTURE_TILE_KEY), 10) || null; }
+  catch (_) { return null; }   // storage blocked: fall back to the first tile
+}
+
+function openCapture(prefill = '') {
+  const modal  = document.getElementById('capture-modal');
+  const input  = document.getElementById('capture-input');
+  const select = document.getElementById('capture-tile');
+  const tiles  = captureTiles();
+
+  select.innerHTML = '';
+  tiles.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = c.name;
+    select.appendChild(opt);
+  });
+  const remembered = rememberedCaptureTileId();
+  if (remembered && tiles.some(c => c.id === remembered)) select.value = String(remembered);
+
+  setCaptureError(tiles.length ? '' : 'Add a tile on the board first: tasks live in tiles.');
+  document.getElementById('capture-save').disabled = tiles.length === 0;
+  input.value = prefill;
+  modal.classList.remove('hidden');
+  input.focus();
+}
+
+function closeCapture() {
+  document.getElementById('capture-modal').classList.add('hidden');
+  setCaptureError('');
+}
+
+function setCaptureError(msg) {
+  const el = document.getElementById('capture-error');
+  el.textContent = msg;
+  el.classList.toggle('hidden', !msg);
+}
+
+async function submitCapture() {
+  const input  = document.getElementById('capture-input');
+  const select = document.getElementById('capture-tile');
+  const save   = document.getElementById('capture-save');
+  const title  = input.value.trim();
+  const colId  = parseInt(select.value, 10);
+  if (!title || !colId || save.disabled) return;
+
+  save.disabled = true;
+  setCaptureError('');
+  try {
+    const task = await post('/api/tasks', { title, column_id: colId });
+    state.tasks.push(task);
+    try { localStorage.setItem(CAPTURE_TILE_KEY, String(colId)); } catch (_) { /* not remembered: harmless */ }
+    renderBoard();
+    closeCapture();
+    const col = state.columns.find(c => c.id === colId);
+    showToast(`Added to ${col ? col.name : 'the board'}`);
+  } catch (err) {
+    // Keep the sheet open with the text intact, and say why (tenet 15)
+    setCaptureError(err.offline
+      ? "Offline: not saved. Your text is still here; try again when you're back online."
+      : "Couldn't save that task. Your text is still here; try again.");
+  } finally {
+    save.disabled = captureTiles().length === 0;
+  }
+}
+
+(function bindCapture() {
+  document.getElementById('capture-form').addEventListener('submit', e => {
+    e.preventDefault();
+    submitCapture();
+  });
+  document.getElementById('capture-close').addEventListener('click', closeCapture);
+  document.getElementById('capture-modal').addEventListener('click', e => {
+    if (e.target.id === 'capture-modal') closeCapture();   // tap outside the panel
+  });
+  document.getElementById('capture-input').addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeCapture();
+  });
+  document.getElementById('phone-today-add').addEventListener('click', () => openCapture());
+})();
+
+// /?capture=1 (the app icon's "Add task" shortcut) opens capture once the
+// board has loaded. The parameter is removed afterwards so a reload doesn't
+// reopen it; if the board can't load yet, it stays for the reconnect boot.
+function handleCaptureParam() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('capture') !== '1') return;
+  params.delete('capture');
+  const qs = params.toString();
+  history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : '') + location.hash);
+  openCapture();
+}
 
 // ── Connection state: the offline note ──────────────────────
 // A quiet header line ("Offline · changes won't save") whenever taskpapr
@@ -3886,6 +4073,7 @@ function setConnection(online) {
   isOffline = !online;
   const note = document.getElementById('offline-note');
   if (note) note.classList.toggle('hidden', online);
+  document.body.classList.toggle('is-offline', isOffline);   // phone header makes room for the note
   clearInterval(offlineRetryTimer);
   offlineRetryTimer = null;
   if (isOffline) {
@@ -3970,6 +4158,7 @@ async function boot() {
     await init();
     boardLoaded = true;
     showBoardUnavailable(false);
+    handleCaptureParam();
   } catch (err) {
     if (!err.offline) throw err;   // not a connectivity problem: surface it as before
     showBoardUnavailable(true);

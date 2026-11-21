@@ -165,13 +165,19 @@ first_col=$(jq -r 'sort_by(.x) | .[0].name' <<<"$cols")
 first_col_id=$(jq -r 'sort_by(.x) | .[0].id' <<<"$cols")
 [[ -n "$first_col" && "$first_col" != null ]] || fail "fresh server has no tiles to test against"
 
+TODAY_ADD="+ Add task"                 # the Today screen's capture button
+CAPTURE_HINT="What needs doing?"      # the capture field's placeholder
 droid open "$BASE/"
 sleep 3
 droid dismiss-popups
 droid open "$BASE/"     # first-run screens can swallow the first navigation
 label=$(tr '[:lower:]' '[:upper:]' <<<"$first_col")   # tile names render uppercase
-if droid wait-for "$label" 45; then ok "board loads in Chrome and shows the '$first_col' tile"
-else shot board-missing; fail "board did not show the '$first_col' tile within 45s"; fi
+if droid wait-for "$TODAY_ADD" 45; then ok "the phone opens to the Today screen"
+else shot today-missing; fail "the phone did not open to the Today screen within 45s"; fi
+shot today-home
+droid tap-text "Show board" || { shot no-board-button; fail "no 'Show board' (📅) button on the Today screen"; }
+if droid wait-for "$label" 15; then ok "one tap on 📅 shows the board with the '$first_col' tile"
+else shot board-missing; fail "the board did not show the '$first_col' tile after tapping 📅"; fi
 droid tap-text "⌂" 2>/dev/null || true   # reset pan/zoom left over in localStorage
 sleep 1
 shot board
@@ -195,6 +201,154 @@ ok "adding a task by touch creates it via the API in '$first_col'"
 if droid wait-for "$title" 10; then ok "the new task is shown on the board"
 else shot add-task-not-shown; fail "task exists in the API but is not shown on the board"; fi
 shot task-added
+
+# ── Phone: Today screen and quick capture ──────────────────────
+echo; echo "Phone: Today screen and quick capture"
+
+second_col=$(jq -r 'sort_by(.x) | .[1].name' <<<"$cols")
+second_col_id=$(jq -r 'sort_by(.x) | .[1].id' <<<"$cols")
+[[ -n "$second_col" && "$second_col" != null ]] || fail "fresh server has fewer than two tiles to test against"
+
+# Evaluate JS in the page (DevTools protocol over adb; see droid.sh eval).
+page() { droid eval "$BASE/" "$1"; }
+
+# Wait until the API has a task with this title; prints "column_id status".
+task_in_api() {
+  local t="$1" found=""
+  for _ in $(seq 1 15); do
+    found=$(curl -fs "$API/api/tasks" | jq -r --arg t "$t" '.[] | select(.title == $t) | "\(.column_id) \(.status)"' 2>/dev/null)
+    [[ -n "$found" ]] && { echo "$found"; return 0; }
+    sleep 1
+  done
+  return 1
+}
+
+# Every header control must sit fully inside the screen, and the offline
+# note (when shown) must be fully readable and not overlap any control.
+# shellcheck disable=SC2016  # JS template literal, not shell expansion
+HEADER_FIT_JS='(() => {
+  const vw = document.documentElement.clientWidth;
+  const header = document.querySelector(".app-header");
+  const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+  const controls = [...header.querySelectorAll("button, .user-trigger, .app-title__mark, .sync-stamp")].filter(shown);
+  const out = controls.filter(el => { const r = el.getBoundingClientRect(); return r.left < 0 || r.right > vw + 0.5; })
+                      .map(el => el.id || el.className);
+  const note = document.getElementById("offline-note");
+  let noteProblem = "";
+  if (shown(note)) {
+    const n = note.getBoundingClientRect();
+    if (note.scrollWidth > note.clientWidth + 1 || n.left < 0 || n.right > vw + 0.5) noteProblem = "offline note is cut off";
+    const hit = controls.find(el => { const r = el.getBoundingClientRect();
+      return r.left < n.right && n.left < r.right && r.top < n.bottom && n.top < r.bottom; });
+    if (hit) noteProblem = "offline note overlaps " + (hit.id || hit.className);
+  }
+  if (header.scrollWidth > header.clientWidth + 1) out.push("header scrolls sideways");
+  return out.length || noteProblem ? `width ${vw}px: ${out.concat(noteProblem || []).join(", ")}` : "fits";
+})()'
+
+# 1. Back to Today; capture from its button into a non-default tile.
+droid tap-text "Show Today" || { shot no-today-button; fail "no 'Show Today' (📅) button on the board"; }
+droid wait-for "$TODAY_ADD" 15 || { shot today-not-back; fail "tapping 📅 on the board did not return to the Today screen"; }
+fit=$(page "$HEADER_FIT_JS") || fail "could not inspect the header layout"
+[[ "$fit" == fits ]] || { shot header-clipped; fail "phone header does not fit: $fit"; }
+ok "the phone header fits the screen with every control visible"
+
+droid tap-text "$TODAY_ADD"
+droid wait-for "$CAPTURE_HINT" 10 || { shot no-capture; fail "'+ Add task' on the Today screen did not open capture"; }
+[[ "$(page 'document.activeElement && document.activeElement.id')" == capture-input ]] \
+  || { shot capture-unfocused; fail "capture opened without the text field focused"; }
+ok "'+ Add task' opens capture with the field focused"
+shot capture-open
+droid tap-text "$first_col" || { shot no-tile-picker; fail "capture's tile picker does not show '$first_col' by default"; }
+droid wait-for "$second_col" 10 || { shot picker-list; fail "the tile picker did not list '$second_col'"; }
+droid tap-text "$second_col"
+sleep 1
+droid tap-text "$CAPTURE_HINT"
+cap1="Captured one $(date +%H%M%S)"
+droid type "$cap1"
+droid key 66
+found=$(task_in_api "$cap1") || { shot capture-missing; fail "task '$cap1' captured on the phone never reached the API"; }
+read -r got_col got_status <<<"$found"
+[[ "$got_col" == "$second_col_id" ]] || fail "captured task landed in tile $got_col, expected '$second_col' ($second_col_id)"
+ok "capture saves the task in the chosen tile ('$second_col')"
+droid wait-for "Added to $second_col" 5 || { shot no-confirmation; fail "no 'Added to $second_col' confirmation after saving"; }
+ok "saving shows a quiet confirmation"
+droid has "$CAPTURE_HINT" && { shot capture-stuck; fail "capture stayed open after saving"; }
+
+droid tap-text "$TODAY_ADD"
+droid wait-for "$CAPTURE_HINT" 10 || fail "capture did not reopen"
+[[ "$(page 'document.getElementById("capture-tile").selectedOptions[0].text')" == "$second_col" ]] \
+  || { shot picker-forgot; fail "the tile picker did not remember '$second_col'"; }
+ok "the tile picker remembers the last tile used on this device"
+droid tap-text Close
+
+# 2. Today list: same tasks, same order as the Today tile; ticks off by touch.
+mk_today() {   # title order → task id
+  local id
+  id=$(curl -fs -X POST -H 'Content-Type: application/json' \
+       -d "$(jq -n --arg t "$1" --argjson c "$first_col_id" '{title:$t, column_id:$c}')" "$API/api/tasks" | jq -r .id) || return 1
+  curl -fs -X PATCH -H 'Content-Type: application/json' \
+       -d "{\"today_flag\":true,\"today_order\":$2}" "$API/api/tasks/$id" >/dev/null || return 1
+  echo "$id"
+}
+today1="Today one"; today2="Today two"
+# Flag in reverse creation order, so Today order differs from board order.
+mk_today "$today2" 2 >/dev/null || fail "could not flag '$today2' for Today via the API"
+id1=$(mk_today "$today1" 1) || fail "could not flag '$today1' for Today via the API"
+if droid wait-for "$today1" 20 && droid wait-for "$today2" 5; then ok "tasks flagged elsewhere appear on the Today screen live (SSE)"
+else shot today-not-live; fail "tasks flagged via the API did not appear on the Today screen"; fi
+order=$(page 'JSON.stringify([...document.querySelectorAll("#phone-today-list .today-task-title")].map(e => e.textContent))')
+expected=$(page 'JSON.stringify(todayTasksSorted().map(t => t.title))')
+[[ "$order" == "$expected" && "$order" == "[\"$today1\",\"$today2\"]" ]] \
+  || fail "Today screen order $order differs from the Today tile's $expected"
+ok "the Today screen lists the Today tile's tasks in the same order"
+shot today-list
+droid tap-text "Mark done: $today1" || { shot no-checkbox; fail "no checkbox for '$today1'"; }
+done_status=""
+for _ in $(seq 1 15); do
+  done_status=$(curl -fs "$API/api/tasks" | jq -r --argjson id "$id1" '.[] | select(.id == $id) | .status')
+  [[ "$done_status" == "done" ]] && break; sleep 1
+done
+[[ "$done_status" == "done" ]] || { shot tick-failed; fail "ticking '$today1' did not mark it done in the API (status: $done_status)"; }
+for _ in $(seq 1 10); do droid has "$today1" || break; sleep 1; done
+droid has "$today1" && { shot ticked-still-shown; fail "'$today1' is done but still listed on the Today screen"; }
+ok "ticking a task completes it via the API and removes it from Today"
+shot today-ticked
+
+# 3. The app shortcut's URL opens capture directly: one action from the home screen.
+droid open "$BASE/?capture=1"
+droid wait-for "$CAPTURE_HINT" 30 || { shot shortcut-no-capture; fail "/?capture=1 did not open capture"; }
+[[ "$(page 'document.activeElement && document.activeElement.id')" == capture-input ]] \
+  || { shot shortcut-unfocused; fail "/?capture=1 opened capture without focusing the field"; }
+[[ "$(page 'location.search')" == "" ]] || fail "/?capture=1 left the parameter in the URL (a reload would reopen capture)"
+cap2="Captured two $(date +%H%M%S)"
+droid type "$cap2"
+droid key 66
+found=$(task_in_api "$cap2") || { shot shortcut-capture-missing; fail "task '$cap2' captured via /?capture=1 never reached the API"; }
+[[ "${found%% *}" == "$second_col_id" ]] || fail "task captured via /?capture=1 went to tile ${found%% *}, not the remembered '$second_col'"
+ok "/?capture=1 opens a focused capture field: type, Enter, saved to the remembered tile"
+
+# 4. A capture that can't be saved says so and keeps the text.
+droid tap-text "$TODAY_ADD"
+droid wait-for "$CAPTURE_HINT" 10 || fail "capture did not open for the failure check"
+cap3="Captured three $(date +%H%M%S)"
+droid type "$cap3"
+stop_server
+droid key 66
+CAPTURE_OFFLINE="Offline: not saved. Your text is still here; try again when you're back online."
+droid wait-for "$CAPTURE_OFFLINE" 20 || { shot no-capture-error; fail "a capture that could not be saved showed no error"; }
+droid has "$cap3" || { shot capture-text-lost; fail "the failed capture's text was cleared"; }
+ok "a failed capture is shown, with the text kept for retry"
+droid wait-for "Offline · changes won't save" 20 || { shot no-note-capture; fail "no offline note after the server went away"; }
+fit=$(page "$HEADER_FIT_JS") || fail "could not inspect the header layout"
+[[ "$fit" == fits ]] || { shot header-clipped-offline; fail "phone header does not fit while offline: $fit"; }
+ok "the phone header still fits with the offline note showing"
+shot capture-failed-offline
+start_server
+for _ in $(seq 1 30); do droid has "Offline · changes won't save" || break; sleep 1; done
+droid tap-text Add || fail "no Add button to retry the capture"
+task_in_api "$cap3" >/dev/null || { shot retry-missing; fail "retrying the capture after reconnecting did not save it"; }
+ok "retrying after reconnecting saves the kept text"
 
 # ── PWA: installable, standalone, honest offline ──────────────
 echo; echo "PWA: install, standalone launch, offline"
@@ -242,7 +396,7 @@ done
 droid has taskpapr && { shot old-icon-stuck; fail "could not remove the taskpapr icon left by an earlier run"; }
 
 droid open "$BASE/"
-droid wait-for "$label" 30 || { shot board-before-install; fail "board did not load before install"; }
+droid wait-for "$TODAY_ADD" 30 || { shot board-before-install; fail "taskpapr did not load before install"; }
 droid tap-text "Customize and control Google Chrome" 2>/dev/null \
   || droid tap-text "Update available. More options" 2>/dev/null \
   || { shot no-chrome-menu; fail "could not find Chrome's menu button"; }
@@ -265,7 +419,7 @@ shot installed-icon
 
 # 3. Launch from the home screen: it must open standalone, without browser UI.
 droid tap-text taskpapr
-droid wait-for "$label" 30 || { shot app-board-missing; fail "the installed app did not show the board"; }
+droid wait-for "$TODAY_ADD" 30 || { shot app-board-missing; fail "the installed app did not show the Today screen"; }
 activity=$(droid top-activity)
 if [[ "$activity" =~ (WebappActivity|webapk) ]] \
    && ! droid has "Customize and control Google Chrome" && ! droid has "Update available. More options"; then
@@ -299,7 +453,7 @@ droid key 3; sleep 2
 droid tap-text taskpapr
 UNAVAILABLE="Can't reach taskpapr. Your board will load when you're back online."
 droid wait-for "$UNAVAILABLE" 30 || { shot cold-offline; fail "opening offline did not explain that the board can't load"; }
-droid has "$title" && { shot cold-offline-stale; fail "opening offline showed the task '$title' from an earlier load"; }
+droid has "$today2" && { shot cold-offline-stale; fail "opening offline showed the Today task '$today2' from an earlier load"; }
 droid has "$OFFLINE_NOTE" || { shot cold-offline-no-note; fail "opening offline did not show the offline note"; }
 ok "opening offline shows the cached shell with an explanation, and no stale tasks"
 shot offline-cold
@@ -307,7 +461,7 @@ shot offline-cold
 # 6. Back online: the board loads by itself and the note clears.
 droid reverse "$PORT"
 droid net on; NET_OFF=0
-droid wait-for "$title" 45 || { shot no-recovery; fail "the board did not load after the connection came back"; }
+droid wait-for "$today2" 45 || { shot no-recovery; fail "the Today screen did not load after the connection came back"; }
 droid has "$OFFLINE_NOTE" && { shot note-stuck; fail "the offline note is still shown after reconnecting"; }
 ok "reconnecting loads the board and clears the offline note"
 shot back-online
@@ -319,11 +473,11 @@ if [[ "$install_kind" == WebAPK ]]; then
   droid long-press taskpapr
   droid wait-for "Add task" 10 || { shot no-shortcut; fail "long-pressing the app icon does not offer 'Add task'"; }
   droid tap-text "Add task"
-  droid wait-for "$label" 30 || { shot shortcut-board; fail "the 'Add task' shortcut did not open the board"; }
-  ok "long-pressing the icon offers 'Add task', which opens the app"
+  droid wait-for "$CAPTURE_HINT" 30 || { shot shortcut-board; fail "the 'Add task' shortcut did not open capture"; }
+  ok "long-pressing the icon offers 'Add task', which opens capture"
 else
   echo -e "  ${YELLOW}–${NC}  SKIP long-press 'Add task': needs a WebAPK install (check on a real phone over https)"
   droid open "$BASE/?capture=1"
-  droid wait-for "$label" 30 || { shot capture-url; fail "the shortcut's URL /?capture=1 does not load the board"; }
-  ok "the shortcut's URL /?capture=1 loads the board"
+  droid wait-for "$CAPTURE_HINT" 30 || { shot capture-url; fail "the shortcut's URL /?capture=1 does not open capture"; }
+  ok "the shortcut's URL /?capture=1 opens capture"
 fi

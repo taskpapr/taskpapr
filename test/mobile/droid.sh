@@ -25,10 +25,13 @@
 #   force-stop PKG       force-stop an app (e.g. com.android.chrome)
 #   net on|off           turn the emulator's wifi and mobile data on or off
 #   dismiss-popups       tap through Chrome first-run / promo dialogs
+#   eval PREFIX JS       evaluate JS in the Chrome page whose URL starts with PREFIX
+#                        (DevTools protocol; prints the result)
 #
 # Environment:
 #   ANDROID_HOME   SDK location (default: ~/Library/Android/sdk)
 #   MOBILE_AVD     AVD name (default: taskpapr_pixel)
+#   MOBILE_CDP_PORT  host port for the DevTools forward used by `eval` (default: 9333)
 #
 # Gotchas baked in:
 #   - every adb call reads </dev/null, otherwise `adb shell` swallows the stdin
@@ -146,6 +149,12 @@ case "$cmd" in
       off) a shell svc wifi disable; a shell svc data disable ;;
       *)   die "usage: net on|off" ;;
     esac ;;
+  eval)
+    cdp_port="${MOBILE_CDP_PORT:-9333}"
+    a forward "tcp:$cdp_port" localabstract:chrome_devtools_remote >/dev/null || die "adb forward for DevTools failed"
+    node "$(dirname "$0")/cdp-eval.js" "$cdp_port" "$1" "$2"; rc=$?
+    a forward --remove "tcp:$cdp_port" >/dev/null 2>&1
+    exit $rc ;;
   dismiss-popups)
     # Chrome first-run, sign-in and promo screens. Loop until none are found.
     for _ in 1 2 3 4 5 6; do
