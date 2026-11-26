@@ -120,6 +120,18 @@ function requireSubscription(req, res, next) {
 // Favicon — the static middleware mounts behind requireAuth, so public pages
 // (/login, /pricing) need this served explicitly or logged-out visitors get
 // a redirect instead of an icon.
+// Icons are loaded by other origins too: Wavebox (and similar wrapper
+// browsers) draw sidebar/tab icons from their own UI origin, which helmet's
+// default Cross-Origin-Resource-Policy: same-origin blocks. Nothing here is
+// secret, so let any origin embed them.
+const ICON_PATH = /^\/(favicon\.(svg|ico)|apple-touch-icon(-precomposed)?\.png|icons\/|manifest\.webmanifest$)/;
+app.use((req, res, next) => {
+  if (ICON_PATH.test(req.path)) res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+});
+// iOS and some wrappers probe these fixed paths without reading <link> tags.
+app.get(['/apple-touch-icon.png', '/apple-touch-icon-precomposed.png'],
+  (_req, res) => res.sendFile(path.join(__dirname, 'public', 'icons', 'icon_256.png')));
 app.get('/favicon.svg', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'favicon.svg')));
 // Clients that ignore <link rel=icon> or can't render SVG (Wavebox's sidebar,
 // bookmark/feed readers) fall back to /favicon.ico — which otherwise hit
