@@ -121,6 +121,10 @@ function requireSubscription(req, res, next) {
 // (/login, /pricing) need this served explicitly or logged-out visitors get
 // a redirect instead of an icon.
 app.get('/favicon.svg', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'favicon.svg')));
+// Clients that ignore <link rel=icon> or can't render SVG (Wavebox's sidebar,
+// bookmark/feed readers) fall back to /favicon.ico — which otherwise hit
+// requireAuth and got a redirect to /login instead of an image.
+app.get('/favicon.ico', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'icons', 'taskpapr.ico')));
 
 // Page scripts — served before requireAuth because /login and /pricing load
 // theirs while logged out. Nothing under /js is secret (the repo is public).

@@ -82,6 +82,11 @@ module.exports = function register(app) {
       if (notesLenErr) return res.status(400).json({ error: notesLenErr });
     }
 
+    // today_order is an INTEGER column; out-of-range values would 500 on Postgres.
+    if (nextOrd != null && (nextOrd < 0 || nextOrd > 2147483647)) {
+      return res.status(400).json({ error: 'today_order must be between 0 and 2147483647' });
+    }
+
     // ── 3. Load current task + verify column ownership ───────────
     const needsCurrent =
       status !== undefined || title !== undefined || goal_id !== undefined ||
