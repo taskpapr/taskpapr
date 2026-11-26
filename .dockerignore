@@ -19,3 +19,5 @@ node_modules/
 # Local env
 .env
 .env.*
+# Android app (built separately; not part of the server image)
+android/

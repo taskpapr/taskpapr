@@ -153,6 +153,23 @@ app.get('/sw.js', (_req, res) => {
   res.send(swSource);
 });
 
+// Digital Asset Links for the Android app (Trusted Web Activity). Public
+// because Chrome and Google's verifier fetch it without cookies. Built once
+// from ANDROID_APP_LINKS (see lib/assetlinks.js). When nothing is configured
+// it's a 404, the normal answer from a site that makes no claims about apps,
+// rather than an empty list that suggests Android was set up.
+const { parseAppLinks } = require('./lib/assetlinks');
+const appLinks = parseAppLinks(process.env.ANDROID_APP_LINKS);
+if (appLinks.errors.length) {
+  console.warn(`ANDROID_APP_LINKS: ignored ${appLinks.errors.length} malformed entr${appLinks.errors.length === 1 ? 'y' : 'ies'} ` +
+    `(expected package=AA:BB:…, 32 hex pairs): ${appLinks.errors.join(', ')}`);
+}
+app.get('/.well-known/assetlinks.json', (_req, res) => {
+  if (!appLinks.statements) return res.sendStatus(404);
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.json(appLinks.statements);
+});
+
 // Pricing pages — expired-trial users must reach /pricing
 app.get('/pricing', (req, res) => {
   if (req.query.ref && req.session) req.session.pending_ref = req.query.ref;

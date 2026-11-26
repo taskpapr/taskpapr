@@ -26,3 +26,19 @@ private_data/**
 
 # Mobile test screenshots (test/mobile.sh)
 test/mobile/screenshots/
+
+# Android build outputs and local config (android/)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.kotlin/
+# Signing material must never be committed (see android/README.md)
+*.jks
+*.keystore
+keystore.properties
+*.keystore.properties
+*-release.properties
+# Gradle's own settings are the only properties files android/ should hold
+android/*.properties
+!android/gradle.properties
