@@ -3938,10 +3938,18 @@ function setupTodayDragReorder(body) {
 }
 
 // Toggle today_flag on a task
+// Next free Today slot: one past the highest order in use, so a newly
+// flagged task lands last. Must stay a small integer — today_order is an
+// INTEGER column and Postgres rejects anything past 2^31-1 (Date.now() did).
+function nextTodayOrder(tasks) {
+  return tasks.reduce((max, t) =>
+    (t.today_flag && t.today_order != null && t.today_order > max) ? t.today_order : max, -1) + 1;
+}
+
 async function toggleTodayFlag(taskId, flagOn) {
   const updated = await patch(`/api/tasks/${taskId}`, {
     today_flag:  flagOn,
-    today_order: flagOn ? Date.now() : null,
+    today_order: flagOn ? nextTodayOrder(state.tasks) : null,
   });
   updateTaskInState(updated);
   renderBoard();

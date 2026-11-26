@@ -713,8 +713,8 @@ server.tool(
   'add_task_to_today',
   'Add an existing task to Today by setting its today_flag. Find the task by id (preferred) or by ' +
   'matching its current title via title_match, which must resolve to exactly one task or the call ' +
-  'returns candidates instead of guessing. The task is appended to the end of Today — stamped with ' +
-  'a fresh order value newer than anything already there, the same way the app\'s Today toggle ' +
+  'returns candidates instead of guessing. The task is appended to the end of Today — given ' +
+  'an order one past the highest already there, the same way the app\'s Today toggle ' +
   'behaves — so it lands last; use reorder_today_tasks afterward for a specific position. A no-op ' +
   '(reported, not an error) if the task is already in Today.',
   {
@@ -765,7 +765,13 @@ server.tool(
       return { content: [{ type: 'text', text: `Task ${task.id} "${task.title}" is already in Today.` }] };
     }
 
-    const updated = await api('PATCH', `/api/tasks/${task.id}`, { today_flag: true, today_order: Date.now() });
+    const updated = await api('PATCH', `/api/tasks/${task.id}`, {
+      today_flag:  true,
+      // One past the highest order in use (small int — today_order is INTEGER;
+      // Date.now() overflowed it on Postgres).
+      today_order: tasks.reduce((m, t) =>
+        (t.today_flag && t.today_order != null && t.today_order > m) ? t.today_order : m, -1) + 1,
+    });
     return { content: [{ type: 'text', text: `✓ Added to Today: task ${updated.id} "${updated.title}"` }] };
   }
 );
